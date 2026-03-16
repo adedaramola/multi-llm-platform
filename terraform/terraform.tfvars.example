@@ -1,0 +1,5 @@
+aws_region        = "us-east-1"
+environment       = "production"
+anthropic_api_key = "sk-ant-..."   # set via TF_VAR_anthropic_api_key env var in CI
+openai_api_key    = "sk-..."       # set via TF_VAR_openai_api_key env var in CI
+alert_email       = "platform-alerts@yourcompany.com"

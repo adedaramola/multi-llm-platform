@@ -1,0 +1,95 @@
+name: Test & Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  id-token: write   # required for OIDC token
+  contents: read
+
+jobs:
+  # ── Tests ──────────────────────────────────────────────────────────────────
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: ai-platform/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r ai-platform/requirements.txt pytest pytest-asyncio
+
+      - name: Run tests
+        run: |
+          cd ai-platform
+          python -m pytest tests/ -v --tb=short
+
+  # ── Deploy (main branch only) ───────────────────────────────────────────────
+  deploy:
+    name: Deploy to Production
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Lambda zip (linux/arm64)
+        run: |
+          cd ai-platform
+          mkdir -p dist/package
+          docker run --rm --platform linux/arm64 \
+            -v "$(pwd)":/src \
+            --entrypoint /bin/bash \
+            public.ecr.aws/lambda/python:3.12-arm64 \
+            -c "pip install -r /src/requirements.txt -t /src/dist/package --quiet \
+                && cp -r /src/ai_platform /src/dist/package/"
+          cd dist/package && zip -r ../ai-platform.zip . -q
+          echo "Zip size: $(du -sh dist/ai-platform.zip | cut -f1)"
+
+      - name: Deploy gateway Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name ai-platform-gateway-production \
+            --zip-file fileb://ai-platform/dist/ai-platform.zip \
+            --architectures arm64 \
+            --region us-east-1
+          aws lambda wait function-updated \
+            --function-name ai-platform-gateway-production \
+            --region us-east-1
+
+      - name: Deploy health-checker Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name ai-platform-health-checker-production \
+            --zip-file fileb://ai-platform/dist/ai-platform.zip \
+            --architectures arm64 \
+            --region us-east-1
+          aws lambda wait function-updated \
+            --function-name ai-platform-health-checker-production \
+            --region us-east-1
+
+      - name: Smoke test
+        run: |
+          API_URL="https://mt1bshinj9.execute-api.us-east-1.amazonaws.com"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$API_URL/health")
+          echo "Health check status: $STATUS"
+          [ "$STATUS" = "200" ] || (echo "Smoke test failed" && exit 1)

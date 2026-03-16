@@ -1,0 +1,33 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Environment — never commit secrets
+.env
+.env.*
+!.env.example
+
+# Terraform — state files contain secrets and resource IDs
+terraform.tfvars
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+tfplan
+
+# Lambda build artifacts
+ai-platform/package/
+ai-platform/dist/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/settings.json
+.idea/
