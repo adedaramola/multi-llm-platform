@@ -81,6 +81,19 @@ jobs:
             --function-name ai-platform-gateway-production \
             --region us-east-1
 
+          # Publish a new version and move the "live" alias to it.
+          # Provisioned concurrency is attached to the alias, so this keeps
+          # the 2 warm instances on the latest code without any downtime.
+          VERSION=$(aws lambda publish-version \
+            --function-name ai-platform-gateway-production \
+            --region us-east-1 \
+            --query Version --output text)
+          aws lambda update-alias \
+            --function-name ai-platform-gateway-production \
+            --name live \
+            --function-version "$VERSION" \
+            --region us-east-1
+
       - name: Deploy health-checker Lambda
         run: |
           aws lambda update-function-code \

@@ -1,9 +1,9 @@
 output "lambda_invoke_arn" {
-  value = aws_lambda_function.gateway.invoke_arn
+  value = aws_lambda_alias.live.invoke_arn
 }
 
 output "lambda_arn" {
-  value = aws_lambda_function.gateway.arn
+  value = aws_lambda_alias.live.arn
 }
 
 output "lambda_function_name" {

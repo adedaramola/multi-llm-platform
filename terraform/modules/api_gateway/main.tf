@@ -67,3 +67,11 @@ resource "aws_cloudwatch_log_group" "api_gw" {
   name              = "/aws/apigw/ai-platform-${var.environment}"
   retention_in_days = 14
 }
+
+# ── WAF note ──────────────────────────────────────────────────────────────────
+# WAFv2 AssociateWebACL does not support API Gateway v2 HTTP APIs.
+# Supported targets: REST API (v1), ALB, CloudFront, AppSync, Cognito.
+# This platform uses API Gateway v2 (70% cheaper). WAF can be added by placing
+# CloudFront in front of the API and attaching WAF at scope=CLOUDFRONT.
+# Current protection: API Gateway throttling (200 rps / 500 burst) + DynamoDB
+# auth + rate limiting covers the primary attack surface.

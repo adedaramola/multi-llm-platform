@@ -51,6 +51,8 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
           "lambda:GetFunction",
           "lambda:GetFunctionConfiguration",
           "lambda:PublishVersion",
+          "lambda:UpdateAlias",
+          "lambda:GetAlias",
         ]
         Resource = [
           var.gateway_function_arn,

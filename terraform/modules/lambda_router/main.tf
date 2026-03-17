@@ -85,6 +85,7 @@ resource "aws_lambda_function" "gateway" {
   architectures    = ["arm64"] # 20% cheaper, same performance
   timeout          = 60        # max provider call time
   memory_size      = 512       # sufficient for FastAPI + boto3 + asyncpg
+  publish          = true      # required for provisioned concurrency
 
   vpc_config {
     subnet_ids         = var.private_subnet_ids
@@ -119,6 +120,27 @@ resource "aws_lambda_function" "gateway" {
 resource "aws_cloudwatch_log_group" "lambda" {
   name              = "/aws/lambda/${local.function_name}"
   retention_in_days = 30
+}
+
+# ── Alias + Provisioned Concurrency ───────────────────────────────────────────
+# "live" alias always points to the latest published version.
+# CI/CD publishes a new version after each code deploy and updates this alias.
+# Provisioned concurrency is attached to the alias, keeping 2 warm instances
+# at all times to eliminate cold starts on the hot path.
+resource "aws_lambda_alias" "live" {
+  name             = "live"
+  function_name    = aws_lambda_function.gateway.function_name
+  function_version = aws_lambda_function.gateway.version
+
+  lifecycle {
+    ignore_changes = [function_version] # CI/CD updates the alias after each deploy
+  }
+}
+
+resource "aws_lambda_provisioned_concurrency_config" "gateway" {
+  function_name                      = aws_lambda_function.gateway.function_name
+  qualifier                          = aws_lambda_alias.live.name
+  provisioned_concurrent_executions  = 2
 }
 
 # ── Lambda Function URL (alternative to API GW for lower latency) ─────────────
