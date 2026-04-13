@@ -1,6 +1,6 @@
 # Multi-LLM Platform — Architecture Design
-**Version:** 1.0
-**Date:** 2026-03-15
+**Version:** 1.1
+**Date:** 2026-04-13
 **Owner:** AI Platform Engineering
 
 ---
@@ -16,9 +16,9 @@
                              ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                        AWS API GATEWAY (v2 HTTP)                        │
-│         Rate limiting · Usage plans · Request validation · WAF          │
+│              Throttling (200 rps / 500 burst) · Request routing         │
 └────────────────────────────┬────────────────────────────────────────────┘
-                             │  Invoke
+                             │  Invoke  (POST /v1/chat  or  /v1/chat/stream)
                              ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                     LAMBDA — AI Gateway (Python/FastAPI)                │
@@ -26,18 +26,17 @@
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
 │  │  Auth Layer  │  │ Rate Limiter │  │  Validator   │  │  Metrics   │ │
 │  │ (API Key →   │  │  (DynamoDB   │  │  (Pydantic)  │  │  Emitter   │ │
-│  │  Cognito/    │  │   counters)  │  │              │  │(CloudWatch)│ │
-│  │  DynamoDB)   │  └──────────────┘  └──────────────┘  └────────────┘ │
-│  └──────────────┘                                                       │
+│  │  DynamoDB)   │  │   counters)  │  │              │  │(CloudWatch)│ │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └────────────┘ │
 │                                                                         │
 │  ┌───────────────────────────────────────────────────────────────────┐ │
 │  │                    SEMANTIC CACHE CHECK                           │ │
-│  │   Embed prompt → query pgvector (RDS Postgres) → hit/miss        │ │
+│  │  Redis exact match → pgvector cosine search → hit/miss           │ │
 │  └───────────────────────────┬───────────────────────────────────────┘ │
 │                               │ MISS                                    │
 │  ┌───────────────────────────▼───────────────────────────────────────┐ │
 │  │                    COST-AWARE ROUTER                              │ │
-│  │   Evaluate: complexity · budget · latency SLA · provider health  │ │
+│  │  complexity · budget · model_preference · latency SLA · health   │ │
 │  └───────┬──────────────┬──────────────┬───────────────┬────────────┘ │
 └──────────┼──────────────┼──────────────┼───────────────┼──────────────┘
            │              │              │               │
@@ -45,8 +44,9 @@
     ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────────┐
     │  AWS     │   │ Anthropic │   │  OpenAI  │   │  Open-source │
     │ Bedrock  │   │  Claude   │   │  GPT-4o  │   │  (Ollama /   │
-    │(Titan/   │   │  API      │   │  API     │   │   vLLM on    │
-    │ Haiku)   │   │           │   │          │   │  Fargate)    │
+    │(Nova     │   │  API      │   │  API     │   │   vLLM on    │
+    │ Micro /  │   │           │   │          │   │  Fargate)    │
+    │ Haiku)   │   │           │   │          │   │  [Phase 3]   │
     └──────────┘   └──────────┘   └──────────┘   └──────────────┘
            │              │              │               │
            └──────────────┴──────────────┴───────────────┘
@@ -71,7 +71,7 @@
 
 | Component | AWS Service | Justification |
 |-----------|------------|---------------|
-| API entry point | API Gateway v2 (HTTP API) | 70% cheaper than REST API, built-in throttling, JWT auth support |
+| API entry point | API Gateway v2 (HTTP API) | 70% cheaper than REST API, built-in throttling and rate limiting |
 | Compute | Lambda (Python 3.12, arm64) | Zero idle cost, auto-scales to thousands of concurrent requests, arm64 is 20% cheaper |
 | Semantic cache store | RDS PostgreSQL + pgvector | Native vector similarity search, no separate vector DB to operate, Aurora Serverless v2 for auto-scale |
 | Response cache (exact) | ElastiCache Serverless (Redis) | Sub-millisecond exact match hits, serverless removes capacity planning |
@@ -93,10 +93,10 @@
 
 | Tier | Models | Use Case | Cost (per 1M tokens) |
 |------|--------|----------|---------------------|
-| Low | Bedrock Titan Lite, Claude Haiku 4.5 | Simple Q&A, classification, summarization | ~$0.25–$1 |
+| Low | Bedrock Nova Micro, Claude Haiku 4.5 | Simple Q&A, classification, summarization | ~$0.04–$1 |
 | Mid | Claude Sonnet 4.6, GPT-4o mini | Multi-step reasoning, code gen, RAG answers | ~$3–$10 |
 | High | Claude Opus 4.6, GPT-4o | Complex analysis, long-context, high-stakes | ~$15–$60 |
-| Open | Llama 3 on Fargate | Batch, non-sensitive, cost-critical workloads | ~infra cost only |
+| Open | Llama 3 on Fargate | Batch, non-sensitive, cost-critical workloads | ~infra cost only [Phase 3] |
 
 ### Routing Pseudocode
 
@@ -107,37 +107,40 @@ def route_request(request: InferenceRequest) -> Provider:
     if cached:
         return CacheHit(cached)
 
-    # 2. Determine complexity score (0.0 – 1.0)
-    complexity = estimate_complexity(
-        token_count=count_tokens(request.prompt),
-        has_code=detect_code(request.prompt),
-        requires_reasoning=request.metadata.get("reasoning_required", False),
-        context_length=len(request.messages),
-    )
+    # 2. Honour explicit model preference (bypasses complexity routing)
+    if request.model_preference:
+        preferred = find_provider(request.model_preference)  # case-insensitive name/model_id match
+        if preferred and health_registry.is_healthy(preferred):
+            return preferred
+        # Falls through to complexity routing if preferred provider is unavailable
 
-    # 3. Check caller's budget hint
-    budget = request.metadata.get("budget", "standard")  # "low" | "standard" | "high"
+    # 3. Determine complexity score (0.0 – 1.0)
+    #    Factors: token count, code detection, reasoning keywords, turn count, budget hint
+    complexity = estimate_complexity(request)
 
-    # 4. Check latency SLA
-    latency_sla_ms = request.metadata.get("latency_sla_ms", 5000)
+    # 4. Select tier from complexity + budget hint
+    #    Thresholds driven from settings (COMPLEXITY_LOW_THRESHOLD / COMPLEXITY_MID_THRESHOLD)
+    tier = select_tier(complexity, request.metadata.budget)
+    # budget=LOW → always "low"; budget=HIGH → "mid" or "high"; STANDARD → complexity-based
 
-    # 5. Route decision
-    if complexity < 0.3 or budget == "low":
-        providers = [BedrockTitanLite, ClaudeHaiku]
-    elif complexity < 0.7 and latency_sla_ms > 3000:
-        providers = [ClaudeSonnet, GPT4oMini]
-    else:
-        providers = [ClaudeOpus, GPT4o]
+    # 5. Build fallback chain starting at target tier
+    #    low → [low, mid, high]   mid → [mid, low, high]   high → [high, mid, low]
+    tier_order = build_fallback_chain(tier)
 
-    # 6. Health check — skip unhealthy providers
-    healthy = [p for p in providers if health_registry.is_healthy(p)]
+    # 6. For each tier, filter to healthy providers sorted by cost
+    for tier in tier_order:
+        candidates = sorted(
+            [p for p in providers[tier] if health_registry.is_healthy(p)],
+            key=lambda p: p.cost_per_token,
+        )
+        for provider in candidates:
+            try:
+                return provider.complete(request, timeout=request.metadata.latency_sla_ms)
+            except (ProviderError, TimeoutError):
+                health_registry.mark_failure(provider)
+                continue  # try next provider
 
-    # 7. Fallback chain
-    if not healthy:
-        healthy = [BedrockTitanLite]  # last resort always-on
-
-    # 8. Pick lowest cost among healthy providers
-    return min(healthy, key=lambda p: p.cost_per_token)
+    raise AllProvidersExhausted()
 ```
 
 ---
@@ -156,46 +159,48 @@ def route_request(request: InferenceRequest) -> Provider:
 
 ```sql
 CREATE TABLE semantic_cache (
-    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    prompt_hash  TEXT NOT NULL,           -- SHA256 of normalized prompt
-    embedding    VECTOR(1536) NOT NULL,   -- text-embedding-3-small dimensions
-    response     TEXT NOT NULL,
-    model_used   TEXT NOT NULL,
-    input_tokens  INT,
-    output_tokens INT,
-    created_at   TIMESTAMPTZ DEFAULT NOW(),
-    expires_at   TIMESTAMPTZ              -- NULL = permanent
+    id            BIGSERIAL PRIMARY KEY,
+    prompt_hash   TEXT NOT NULL UNIQUE,   -- SHA256 of normalized prompt
+    embedding     VECTOR(1536) NOT NULL,  -- Bedrock Titan Embeddings v1 dimensions
+    response      TEXT NOT NULL,
+    model_used    TEXT NOT NULL DEFAULT '',
+    input_tokens  INT NOT NULL DEFAULT 0,
+    output_tokens INT NOT NULL DEFAULT 0,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at    TIMESTAMPTZ             -- NULL = permanent
 );
 
-CREATE INDEX ON semantic_cache
-    USING ivfflat (embedding vector_cosine_ops)
+CREATE INDEX semantic_cache_embedding_idx
+    ON semantic_cache USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
-
-CREATE INDEX ON semantic_cache (prompt_hash);
 ```
+
+> The `prompt_hash` column has a `UNIQUE` constraint, so no separate hash index is needed. Embedding model is always Bedrock Titan Embeddings v1 (`amazon.titan-embed-text-v1`) — no OpenAI embeddings dependency.
 
 ### Retrieval Logic
 
 ```python
-def lookup(prompt: str, threshold: float = 0.92) -> CacheResult | None:
-    # Fast path: exact match via Redis
+async def lookup(prompt: str, threshold: float = 0.92) -> CacheResult | None:
+    # Fast path: exact match via Redis (sub-millisecond)
     key = f"cache:{sha256(normalize(prompt))}"
-    if hit := redis.get(key):
+    if hit := await redis.get(key):
         return CacheResult(response=hit, source="exact")
 
-    # Semantic path: vector similarity
-    embedding = embed(prompt)
-    row = db.execute("""
-        SELECT response, 1 - (embedding <=> %s) AS similarity
+    # Semantic path: vector similarity via pgvector
+    embedding = await embed(prompt)  # non-blocking — runs in executor
+    row = await pg.fetchrow("""
+        SELECT response, model_used,
+               1 - (embedding <=> $1::vector) AS similarity
         FROM semantic_cache
-        WHERE expires_at IS NULL OR expires_at > NOW()
-        ORDER BY embedding <=> %s
+        WHERE (expires_at IS NULL OR expires_at > NOW())
+        ORDER BY embedding <=> $1::vector
         LIMIT 1
-    """, [embedding, embedding]).fetchone()
+    """, embedding)
 
-    if row and row.similarity >= threshold:
-        redis.setex(key, 3600, row.response)  # promote to Redis
-        return CacheResult(response=row.response, source="semantic", similarity=row.similarity)
+    if row and row["similarity"] >= threshold:
+        await promote_to_redis(key, row["response"])  # warm exact cache
+        return CacheResult(response=row["response"], source="semantic",
+                           similarity=row["similarity"])
 
     return None
 ```
@@ -214,18 +219,27 @@ def lookup(prompt: str, threshold: float = 0.92) -> CacheResult | None:
 ```
 Namespace: ai-platform/inference
 
-Dimensions: provider, model, route_tier, status
+Dimensions: [provider, model, tier]
 
 Metrics:
-  - request_count          (Count)
-  - input_tokens           (Count)
-  - output_tokens          (Count)
-  - total_cost_usd         (None — dollar value)
-  - latency_ms             (Milliseconds) — p50, p90, p99
-  - cache_hit_rate         (Percent)
-  - provider_error_rate    (Percent)
-  - routing_tier           (Count by tier: low/mid/high)
+  - RequestCount        (Count)
+  - InputTokens         (Count)
+  - OutputTokens        (Count)
+  - TotalTokens         (Count)
+  - LatencyMs           (Milliseconds)
+  - CacheHit            (Count)        -- 1 = hit, 0 = miss
+  - EstimatedCostUSD    (None)
+  - ErrorCount          (Count)        -- 1 when status >= 500
+
+Namespace: ai-platform/errors
+
+Dimensions: [error_type]
+
+Metrics:
+  - ErrorCount          (Count)
 ```
+
+All metrics are emitted via stdout in Lambda (EMF JSON format) — no CloudWatch agent or PutMetricData API calls needed. Lambda captures stdout as structured CloudWatch log events and extracts the metrics automatically.
 
 ### Dashboards
 
@@ -319,39 +333,39 @@ X-Ray active tracing on all Lambda invocations. Segments:
 ai-platform/
 ├── gateway/
 │   ├── __init__.py
-│   ├── app.py              # FastAPI app, Lambda handler (Mangum)
-│   └── middleware.py       # CORS, request ID injection
+│   └── app.py              # FastAPI app, all middleware, Lambda handler (Mangum)
+│                           # Endpoints: POST /v1/chat, POST /v1/chat/stream, GET /health
 ├── router/
 │   ├── __init__.py
-│   ├── router.py           # Core routing decision engine
-│   ├── policies.py         # Complexity estimator, budget policies
+│   ├── router.py           # Cost-aware routing engine + streaming variant
+│   ├── policies.py         # Complexity estimator, tier selection (settings-driven thresholds)
 │   └── health.py           # Provider health registry (DynamoDB-backed)
 ├── providers/
 │   ├── __init__.py
-│   ├── base.py             # Abstract BaseProvider interface
-│   ├── openai_provider.py  # OpenAI & compatible APIs
+│   ├── base.py             # Abstract BaseProvider (complete + stream + health_check)
 │   ├── anthropic_provider.py
-│   └── bedrock_provider.py
+│   ├── openai_provider.py  # OpenAI & any OpenAI-compatible endpoint
+│   └── bedrock_provider.py # Nova Micro (low tier) + Claude Haiku via Bedrock
 ├── cache/
 │   ├── __init__.py
-│   ├── semantic_cache.py   # pgvector lookup + write
-│   └── exact_cache.py      # Redis exact-match cache
+│   └── semantic_cache.py   # Two-layer cache: Redis exact match + pgvector semantic
 ├── auth/
 │   ├── __init__.py
-│   ├── authenticator.py    # API key validation
-│   └── rate_limiter.py     # DynamoDB sliding window
+│   ├── authenticator.py    # DynamoDB API key validation (dev bypass for local)
+│   └── rate_limiter.py     # DynamoDB sliding window (per-minute + per-day)
 ├── metrics/
 │   ├── __init__.py
-│   ├── tracker.py          # Token + cost accumulator
-│   └── emitter.py          # CloudWatch EMF publisher
+│   └── emitter.py          # CloudWatch EMF publisher (stdout → Lambda → CW Logs)
 ├── models/
 │   ├── __init__.py
 │   └── schemas.py          # Pydantic request/response models
 ├── config/
 │   ├── __init__.py
-│   └── settings.py         # Pydantic settings (env vars)
+│   └── settings.py         # Pydantic settings from env vars (lru_cache singleton)
+├── utils.py                # Shared helpers (fetch_secret)
+├── health_checker.py       # Standalone EventBridge Lambda — checks all providers
 ├── requirements.txt
-└── Dockerfile              # For local dev / Fargate open-source tier
+└── Dockerfile              # Local dev (uvicorn) — mirrors Lambda Python 3.12 arm64
 ```
 
 ---
@@ -362,33 +376,27 @@ ai-platform/
 terraform/
 ├── main.tf                 # Root module wiring
 ├── variables.tf            # Global input variables
-├── outputs.tf              # Exported values (API URL, etc.)
+├── outputs.tf              # Exported values (API URL, dashboard URL, function name)
 ├── terraform.tfvars.example
 └── modules/
-    ├── api_gateway/
-    │   ├── main.tf         # HTTP API, routes, stages, WAF
-    │   ├── variables.tf
-    │   └── outputs.tf
-    ├── lambda_router/
-    │   ├── main.tf         # Lambda function, IAM role, layers
-    │   ├── variables.tf
-    │   └── outputs.tf
-    ├── caching/
-    │   ├── main.tf         # RDS Aurora Serverless (pgvector), ElastiCache Serverless
-    │   ├── variables.tf
-    │   └── outputs.tf
+    ├── networking/
+    │   └── main.tf         # VPC, public/private subnets, NAT GW, SGs, VPC endpoints
+    │                       # (DynamoDB Gateway endpoint, Secrets Manager Interface endpoint)
     ├── auth/
-    │   ├── main.tf         # DynamoDB api_keys table, Secrets Manager refs
-    │   ├── variables.tf
-    │   └── outputs.tf
+    │   └── main.tf         # DynamoDB tables (api_keys, rate_limits, health), Secrets Manager
+    ├── caching/
+    │   └── main.tf         # Aurora Serverless v2 + pgvector, ElastiCache Serverless (Redis)
+    ├── lambda_router/
+    │   └── main.tf         # Gateway Lambda, IAM role, CW log group, alias, provisioned concurrency
+    ├── api_gateway/
+    │   └── main.tf         # HTTP API v2, routes (POST /v1/chat, POST /v1/chat/stream, GET /health)
+    │                       # Note: WAF not supported on API GW v2; add CloudFront layer for WAF
+    ├── health_checker/
+    │   └── main.tf         # Health-checker Lambda, EventBridge rule (every 5 min)
     ├── monitoring/
-    │   ├── main.tf         # CloudWatch dashboards, alarms, SNS topics
-    │   ├── variables.tf
-    │   └── outputs.tf
-    └── networking/
-        ├── main.tf         # VPC, subnets, security groups, VPC endpoints
-        ├── variables.tf
-        └── outputs.tf
+    │   └── main.tf         # CloudWatch dashboard, alarms (error rate, p99, throttles), SNS alerts
+    └── ci_cd/
+        └── main.tf         # GitHub Actions OIDC provider + IAM deploy role
 ```
 
 ---
@@ -396,58 +404,61 @@ terraform/
 ## 9. Request Lifecycle
 
 ```
-1. CLIENT sends POST /v1/chat with:
+1. CLIENT sends POST /v1/chat (or /v1/chat/stream) with:
    - Authorization: Bearer <api_key>
-   - Body: { model_preference, messages[], metadata: { budget, latency_sla_ms } }
+   - Body: { messages[], model_preference?, max_tokens, temperature,
+             metadata: { budget, latency_sla_ms, reasoning_required, stream } }
 
 2. API GATEWAY
-   - Validates JWT or passes API key header through
-   - Applies usage plan throttle (global rate limit)
-   - Routes to Lambda integration
+   - Applies throttling (200 rps sustained / 500 burst)
+   - Routes to Lambda integration via AWS_PROXY
 
-3. LAMBDA — AUTH LAYER
-   - Looks up API key in DynamoDB api_keys table
-   - Returns 401 if invalid or revoked
-   - Resolves caller_id and per-key rate limits
+3. LAMBDA — REQUEST ID MIDDLEWARE
+   - Attaches X-Request-ID to request state and response headers
 
-4. LAMBDA — RATE LIMITER
-   - Increments sliding window counter in DynamoDB (TTL = 60s)
-   - Returns 429 if caller exceeds per-minute or per-day quota
+4. LAMBDA — AUTH LAYER
+   - Extracts Bearer token from Authorization header
+   - SHA256 hashes the key, looks up in DynamoDB api_keys table
+   - Returns 401 if key missing, invalid, or revoked
+   - Resolves caller_id and per-key rpm/rpd limits
 
-5. LAMBDA — VALIDATOR
-   - Pydantic validation of request body
-   - Rejects malformed or oversized prompts
+5. LAMBDA — RATE LIMITER
+   - Increments per-minute and per-day sliding window counters in DynamoDB (TTL-expired)
+   - Returns 429 with Retry-After header if either limit exceeded
 
-6. LAMBDA — CACHE CHECK
-   - Normalize and hash the prompt
-   - Redis GET on hash key → fast exact match
-   - On miss: embed prompt → pgvector cosine search
-   - If similarity ≥ 0.92 → return cached response, skip steps 7–8
+6. LAMBDA — VALIDATOR
+   - Pydantic validates request body (message roles, content length, token limits)
+   - Rejects malformed requests with 422
 
-7. LAMBDA — ROUTER
-   - Score complexity (token count, code detection, reasoning hints)
-   - Select model tier based on complexity + budget hint
-   - Filter by provider health (DynamoDB health flags)
-   - Return ordered provider list
+7. LAMBDA — CACHE CHECK
+   - Normalize and SHA256 hash the prompt
+   - Redis GET on prompt hash → exact match (sub-millisecond)
+   - On miss: Bedrock Titan embed prompt (async, non-blocking) → pgvector cosine search
+   - If similarity ≥ 0.92 → return cached response, promote to Redis, skip steps 8–9
 
-8. LAMBDA — PROVIDER CALL
-   - Call selected provider with retry (exponential backoff, max 2 retries)
-   - On provider failure → immediately try next provider in fallback chain
-   - Record start/end time, token usage from response headers/body
+8. LAMBDA — ROUTER
+   - If model_preference set → attempt pinned provider first, fall back on failure
+   - Score complexity (token volume, code detection, reasoning keywords, turn count)
+   - Select tier from complexity + budget hint using settings-driven thresholds
+   - Build fallback chain from target tier
+   - For each tier: filter healthy providers (DynamoDB health registry), sort by cost
+   - Call provider with latency_sla_ms timeout; on failure mark unhealthy, try next
 
-9. LAMBDA — CACHE WRITE (async, non-blocking)
-   - Embed response prompt
-   - Write to pgvector semantic cache
-   - Write exact hash to Redis with TTL
+9. LAMBDA — CACHE WRITE (asyncio.create_task — fire and forget)
+   - Embed prompt, write (embedding, response, tokens) to pgvector
+   - Write exact hash → Redis with TTL
 
 10. LAMBDA — METRICS EMIT
-    - CloudWatch EMF: latency, tokens, cost, model, cache_hit, status
+    - CloudWatch EMF via stdout: RequestCount, InputTokens, OutputTokens, LatencyMs,
+      CacheHit, EstimatedCostUSD, ErrorCount (dimensions: provider, model, tier)
     - X-Ray segment closed
 
 11. API GATEWAY
-    - Returns response to client
-    - Headers: X-Request-ID, X-Model-Used, X-Cache-Hit, X-Tokens-Used
+    - Returns JSON response to client
+    - Response headers: X-Request-ID
 ```
+
+**Streaming path** (`POST /v1/chat/stream`): steps 1–7 are identical. Step 8 calls `provider.stream()` instead of `complete()` and yields tokens as SSE events (`data: <token>\n\n`). Cache hits are returned as a single synthetic SSE event. Final event is always `data: [DONE]\n\n`. Step 9 is skipped (token counts not available mid-stream).
 
 ---
 
