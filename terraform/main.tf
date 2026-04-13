@@ -11,8 +11,9 @@ terraform {
     }
   }
 
+  # Partial backend config — bucket is provided via backend.hcl (gitignored).
+  # Run: terraform init -backend-config=backend.hcl
   backend "s3" {
-    bucket  = "ai-platform-tfstate-900009968072"
     key     = "ai-platform/terraform.tfstate"
     region  = "us-east-1"
     encrypt = true

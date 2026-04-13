@@ -24,7 +24,7 @@
 | API Gateway URL | `https://ozj6y1pi1g.execute-api.us-east-1.amazonaws.com/` |
 | Lambda function | `ai-platform-gateway-production` |
 | CloudWatch dashboard | `https://us-east-1.console.aws.amazon.com/cloudwatch/home#dashboards:name=ai-platform-production` |
-| AWS account | `900009968072` / `us-east-1` |
+| AWS account | `us-east-1` |
 | Aurora cluster | `ai-platform-pgvector-production` |
 | ElastiCache | `ai-platform-production` |
 

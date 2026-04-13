@@ -1,0 +1,6 @@
+# Copy this file to backend.hcl and fill in your values.
+# backend.hcl is gitignored — never commit it.
+#
+# Usage: terraform init -backend-config=backend.hcl
+
+bucket = "ai-platform-tfstate-<your-aws-account-id>"

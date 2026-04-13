@@ -20,6 +20,7 @@ terraform.tfvars
 .terraform/
 .terraform.lock.hcl
 tfplan
+terraform/backend.hcl
 
 # Lambda build artifacts
 ai-platform/package/
