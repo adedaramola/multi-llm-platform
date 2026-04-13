@@ -3,8 +3,16 @@ name: Test & Deploy
 on:
   push:
     branches: [main]
+    paths:
+      - "ai-platform/**"
+      - "terraform/**"
+      - ".github/workflows/**"
   pull_request:
     branches: [main]
+    paths:
+      - "ai-platform/**"
+      - "terraform/**"
+      - ".github/workflows/**"
 
 permissions:
   id-token: write   # required for OIDC token
@@ -107,7 +115,7 @@ jobs:
 
       - name: Smoke test
         run: |
-          API_URL="https://mt1bshinj9.execute-api.us-east-1.amazonaws.com"
+          API_URL="https://ozj6y1pi1g.execute-api.us-east-1.amazonaws.com"
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$API_URL/health")
           echo "Health check status: $STATUS"
           [ "$STATUS" = "200" ] || (echo "Smoke test failed" && exit 1)
