@@ -9,6 +9,8 @@ On cache miss the caller is responsible for writing the response back.
 """
 from __future__ import annotations
 
+import asyncio
+import datetime
 import hashlib
 import json
 import logging
@@ -64,8 +66,8 @@ class SemanticCache:
             self._pg = await asyncpg.connect(self._settings.pg_dsn)
         return self._pg
 
-    def _embed(self, text: str) -> list[float]:
-        """Call Bedrock Titan Embeddings synchronously (fast enough in Lambda)."""
+    def _embed_sync(self, text: str) -> list[float]:
+        """Call Bedrock Titan Embeddings (blocking I/O — always run via executor)."""
         response = self._bedrock.invoke_model(
             modelId=self._settings.embedding_model,
             body=json.dumps({"inputText": text[:8000]}),
@@ -74,6 +76,11 @@ class SemanticCache:
         )
         body = json.loads(response["body"].read())
         return body["embedding"]
+
+    async def _embed(self, text: str) -> list[float]:
+        """Non-blocking wrapper: runs Bedrock SDK call off the event loop."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._embed_sync, text)
 
     async def lookup(self, prompt: str) -> CacheResult | None:
         if not self._settings.cache_enabled:
@@ -99,7 +106,7 @@ class SemanticCache:
 
         # ── Layer 2: pgvector semantic search ─────────────────────────────────
         try:
-            embedding = self._embed(normalized)
+            embedding = await self._embed(normalized)
             pg = await self._get_pg()
             row = await pg.fetchrow(
                 """
@@ -154,16 +161,17 @@ class SemanticCache:
 
         # Write to pgvector for semantic recall
         try:
-            embedding = self._embed(normalized)
+            embedding = await self._embed(normalized)
             pg = await self._get_pg()
-            expires_sql = (
-                f"NOW() + INTERVAL '{ttl_seconds} seconds'" if ttl_seconds else "NULL"
+            expires_at: datetime.datetime | None = (
+                datetime.datetime.utcnow() + datetime.timedelta(seconds=ttl_seconds)
+                if ttl_seconds else None
             )
             await pg.execute(
-                f"""
+                """
                 INSERT INTO semantic_cache
                     (prompt_hash, embedding, response, model_used, input_tokens, output_tokens, expires_at)
-                VALUES ($1, $2::vector, $3, $4, $5, $6, {expires_sql})
+                VALUES ($1, $2::vector, $3, $4, $5, $6, $7)
                 ON CONFLICT (prompt_hash) DO UPDATE
                     SET response = EXCLUDED.response,
                         model_used = EXCLUDED.model_used,
@@ -177,6 +185,7 @@ class SemanticCache:
                 model_used,
                 input_tokens,
                 output_tokens,
+                expires_at,
             )
         except Exception as exc:
             logger.warning("pgvector_write_failed", extra={"error": str(exc)})

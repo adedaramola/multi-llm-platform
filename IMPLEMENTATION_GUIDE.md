@@ -15,6 +15,18 @@
 | Phase 8 — CI/CD | ✅ Done | GitHub Actions OIDC pipeline green; 18/18 tests, full deploy, smoke test |
 | Phase 9 — Tests | ✅ Done | 18 pytest tests covering policies + router; passing in CI |
 | Phase 10 — Hardening | ✅ Done | Provisioned concurrency (2 warm instances); WAF skipped — not supported on API GW v2 HTTP APIs |
+| Phase 11 — Improvements | ✅ Done | Bug fixes, streaming endpoint, model_preference routing, settings-driven thresholds |
+
+### Live environment
+
+| Resource | Value |
+|----------|-------|
+| API Gateway URL | `https://ozj6y1pi1g.execute-api.us-east-1.amazonaws.com/` |
+| Lambda function | `ai-platform-gateway-production` |
+| CloudWatch dashboard | `https://us-east-1.console.aws.amazon.com/cloudwatch/home#dashboards:name=ai-platform-production` |
+| AWS account | `900009968072` / `us-east-1` |
+| Aurora cluster | `ai-platform-pgvector-production` |
+| ElastiCache | `ai-platform-production` |
 
 ---
 
@@ -293,6 +305,63 @@ The workflow at `.github/workflows/deploy.yml` has two jobs:
 
 ---
 
+## Phase 11 — Improvements
+
+**Goal:** Fix correctness bugs, eliminate code duplication, and add streaming + model pinning.
+
+### What changed
+
+**Bug fixes**
+
+- **SQL injection** — `semantic_cache.py` `write()` was interpolating `ttl_seconds` directly into SQL (`INTERVAL '{ttl_seconds} seconds'`). Replaced with a fully parameterised `$7` binding using a `datetime | None` value.
+
+- **Blocking event loop** — `SemanticCache._embed()` called the Bedrock SDK synchronously inside async methods, stalling the event loop on every cache lookup and write. Split into `_embed_sync()` + async `_embed()` that offloads via `run_in_executor`.
+
+- **Deprecated `asyncio.get_event_loop()`** — replaced with `asyncio.get_running_loop()` in `bedrock_provider.py`, `rate_limiter.py`, and `authenticator.py`. Also removed the stale `self._loop` stored at `__init__` time in `BedrockProvider` (a different event loop may be running at call time in Lambda).
+
+- **Health status `"degraded"` never returned** — `/health` only returned `"ok"` or `"unhealthy"`. Now returns `"degraded"` when some but not all providers are down, which is the common real-world failure mode.
+
+**Code quality**
+
+- **Duplicate `_fetch_secret`** — the function existed identically in both `gateway/app.py` and `health_checker.py`. Extracted to `ai_platform/utils.py` and both files import from there.
+
+- **Health checker log format** — logger calls used malformed f-string patterns (`logger.info(f'"event: {val}"', extra={})`) that produced double-quoted strings in CloudWatch. Fixed to `logger.info("event", extra={"key": val})`.
+
+**Config-driven behaviour**
+
+- **Hardcoded complexity thresholds** — `policies.py` `select_tier()` hardcoded `0.30` and `0.70`. Now reads `settings.complexity_low_threshold` and `settings.complexity_mid_threshold` so thresholds can be tuned via environment variables without code changes.
+
+**New features**
+
+- **`model_preference` routing** — `InferenceRequest.model_preference` was accepted but silently ignored. The router now attempts the named provider first (case-insensitive substring match on provider name or model ID) before falling back to the normal tier chain.
+
+- **Streaming SSE endpoint** — `POST /v1/chat/stream` returns `text/event-stream`. Each token is emitted as `data: <token>\n\n`. Cache hits are served as a single synthetic SSE event. Final event is always `data: [DONE]\n\n`.
+
+**Infrastructure**
+
+- Added `POST /v1/chat/stream` route to API Gateway (`terraform/modules/api_gateway/main.tf`).
+- Added `pg_secret_arn` field to `Settings` so the Lambda can resolve the Aurora DSN from the RDS-managed secret at cold start — no plaintext password in environment variables.
+
+### Rebuild and redeploy after changes
+
+```bash
+# 1. Rebuild the zip with updated source
+cd ai-platform
+cp -r ai_platform package/
+cd package && zip -r ../dist/ai-platform.zip . -q
+
+# 2. Push to Lambda
+aws lambda update-function-code \
+  --function-name ai-platform-gateway-production \
+  --zip-file fileb://dist/ai-platform.zip \
+  --architectures arm64
+
+# 3. Apply any Terraform changes (e.g. new API GW routes)
+cd ../terraform && terraform apply
+```
+
+---
+
 ## Phase 9 — Tests
 
 **Goal:** Catch routing and policy bugs before they reach production.
@@ -392,15 +461,113 @@ aws dynamodb update-item \
 cd terraform && terraform destroy
 ```
 
+### Streaming endpoint
+
+```bash
+# Tokens arrive as SSE events; [DONE] signals completion
+curl -N -X POST $API_URL/v1/chat/stream \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"messages": [{"role": "user", "content": "Explain recursion briefly."}], "metadata": {"budget": "low"}}'
+
+# Expected output format:
+# data: Recursion is...
+# data:  a function...
+# data: [DONE]
+```
+
+### Model preference pinning
+
+Force a specific provider regardless of complexity score:
+
+```bash
+curl -X POST $API_URL/v1/chat \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "Hello"}],
+    "model_preference": "sonnet"
+  }'
+# Routes to anthropic-sonnet. Falls back to normal tier routing if unavailable.
+# Match is case-insensitive substring on provider name OR model ID.
+```
+
+### Tuning routing thresholds without code changes
+
+```bash
+# Override complexity thresholds via Lambda environment variables
+aws lambda update-function-configuration \
+  --function-name ai-platform-gateway-production \
+  --environment "Variables={COMPLEXITY_LOW_THRESHOLD=0.25,COMPLEXITY_MID_THRESHOLD=0.65}"
+```
+
 ### Adding a new LLM provider
 
 1. Create `ai-platform/ai_platform/providers/new_provider.py` implementing `BaseProvider`
 2. Add a config function returning `ProviderConfig` with the correct tier and cost
 3. Import and instantiate in `gateway/app.py` lifespan
 4. Add to the appropriate tier list in `providers_by_tier`
+5. If the provider needs an API key, add a secret ARN field to `Settings` and resolve it in the lifespan the same way `anthropic_key` and `openai_key` are resolved
 
 No other files need to change.
 
 ---
 
-*Last updated: 2026-03-16 — All 10 phases complete. Platform is live and production-hardened. WAF requires CloudFront layer (API GW v2 limitation).*
+## Coding conventions
+
+These conventions were established through fixes made to the codebase. Follow them to avoid reintroducing the same classes of bugs.
+
+**Async I/O**
+
+- Never call blocking SDK methods (boto3, asyncpg, Redis) directly inside `async def`. Always wrap in `run_in_executor`.
+- Use `asyncio.get_running_loop()` inside async functions. Never use `asyncio.get_event_loop()` — it is deprecated in Python 3.10+ when called from a running loop.
+- Never store `self._loop = asyncio.get_event_loop()` in `__init__`. The event loop at `__init__` time may differ from the loop at call time in Lambda.
+
+```python
+# Wrong
+result = self._boto3_client.invoke_model(...)  # blocks event loop
+
+# Right
+loop = asyncio.get_running_loop()
+result = await loop.run_in_executor(None, self._invoke_sync, args)
+```
+
+**Parameterised SQL**
+
+- Never interpolate variables into SQL strings. Always use asyncpg positional parameters (`$1`, `$2`, ...).
+
+```python
+# Wrong — SQL injection risk
+await pg.execute(f"... expires_at = NOW() + INTERVAL '{ttl} seconds'")
+
+# Right
+expires_at = datetime.utcnow() + timedelta(seconds=ttl) if ttl else None
+await pg.execute("... expires_at = $7", ..., expires_at)
+```
+
+**Shared utilities**
+
+- If a helper is used in more than one module, put it in `ai_platform/utils.py`. Do not duplicate it.
+
+**Logging**
+
+- Use structured logging: `logger.info("event_name", extra={"key": value})`.
+- Never embed values directly in the message string with f-strings — it breaks CloudWatch Logs Insights queries.
+
+```python
+# Wrong
+logger.info(f'"provider_healthy: {name} latency={ms}ms"')
+
+# Right
+logger.info("provider_healthy", extra={"provider": name, "latency_ms": ms})
+```
+
+**Settings and config**
+
+- Every tunable value belongs in `Settings` (`config/settings.py`) as a typed field with a sensible default. Never hardcode thresholds, timeouts, or table names in business logic.
+- `get_settings()` is `@lru_cache` — it is called once per cold start. To inject values at startup (e.g. a DSN resolved from a secret), set `os.environ["FIELD_NAME"]` before the first call, or pass the value explicitly to the consuming class.
+
+---
+
+*Last updated: 2026-04-13 — Phase 11 complete. Streaming endpoint live, model_preference routing added, bug fixes applied. Live URL: `https://ozj6y1pi1g.execute-api.us-east-1.amazonaws.com/`*

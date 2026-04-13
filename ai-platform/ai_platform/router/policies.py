@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import re
 
+from ..config.settings import get_settings
 from ..models.schemas import BudgetHint, InferenceRequest
 
 
@@ -59,6 +60,7 @@ def select_tier(complexity: float, budget: BudgetHint) -> str:
 
     Budget LOW always forces low tier regardless of complexity.
     Budget HIGH forces at least mid tier.
+    Thresholds are driven by settings so they can be tuned without code changes.
     """
     if budget == BudgetHint.LOW:
         return "low"
@@ -66,9 +68,10 @@ def select_tier(complexity: float, budget: BudgetHint) -> str:
     if budget == BudgetHint.HIGH:
         return "high" if complexity >= 0.5 else "mid"
 
-    # STANDARD budget — pure complexity-based
-    if complexity < 0.30:
+    # STANDARD budget — complexity-based using configurable thresholds
+    settings = get_settings()
+    if complexity < settings.complexity_low_threshold:
         return "low"
-    if complexity < 0.70:
+    if complexity < settings.complexity_mid_threshold:
         return "mid"
     return "high"

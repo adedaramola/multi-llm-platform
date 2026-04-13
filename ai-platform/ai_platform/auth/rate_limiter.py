@@ -85,5 +85,5 @@ class RateLimiter:
         return int(response["Attributes"]["count"])
 
     async def _increment(self, key: str, ttl: int) -> int:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._increment_sync, key, ttl)

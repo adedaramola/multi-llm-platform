@@ -49,6 +49,12 @@ resource "aws_apigatewayv2_route" "chat" {
   target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
 }
 
+resource "aws_apigatewayv2_route" "chat_stream" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "POST /v1/chat/stream"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+}
+
 resource "aws_apigatewayv2_route" "health" {
   api_id    = aws_apigatewayv2_api.main.id
   route_key = "GET /health"

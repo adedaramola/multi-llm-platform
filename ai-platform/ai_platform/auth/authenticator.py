@@ -57,7 +57,7 @@ class Authenticator:
 
         key_hash = self._hash_key(raw_key)
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
                 None, lambda: self._table.get_item(Key={"key_hash": key_hash})
             )

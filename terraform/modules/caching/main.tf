@@ -31,7 +31,7 @@ resource "aws_rds_cluster" "pgvector" {
   vpc_security_group_ids      = [var.cache_sg_id]
   db_subnet_group_name        = aws_db_subnet_group.pgvector.name
   storage_encrypted           = true
-  deletion_protection         = var.environment == "production"
+  deletion_protection         = var.environment != "production"
   skip_final_snapshot         = var.environment != "production"
   final_snapshot_identifier   = var.environment == "production" ? "ai-platform-final-${formatdate("YYYYMMDD", timestamp())}" : null
 

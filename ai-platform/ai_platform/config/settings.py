@@ -27,7 +27,8 @@ class Settings(BaseSettings):
     # ── Cache ──────────────────────────────────────────────────────────────────
     redis_url: str = ""                    # ElastiCache Serverless endpoint
     redis_ttl_seconds: int = 3600
-    pg_dsn: str = ""                       # Aurora Serverless pgvector DSN
+    pg_dsn: str = ""                       # Aurora Serverless pgvector DSN (direct)
+    pg_secret_arn: str = ""               # RDS-managed master user secret ARN
     semantic_cache_threshold: float = 0.92
     cache_enabled: bool = True
 

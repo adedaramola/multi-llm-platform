@@ -46,7 +46,6 @@ class BedrockProvider(BaseProvider):
         super().__init__(config)
         settings = get_settings()
         self._client = boto3.client("bedrock-runtime", region_name=settings.bedrock_region)
-        self._loop = asyncio.get_event_loop()
 
     def _invoke_sync(self, body: dict) -> dict:
         response = self._client.invoke_model(
@@ -85,7 +84,7 @@ class BedrockProvider(BaseProvider):
             if system_prompt:
                 body["system"] = [{"text": system_prompt}]
 
-            result = await self._loop.run_in_executor(None, self._invoke_sync, body)
+            result = await asyncio.get_running_loop().run_in_executor(None, self._invoke_sync, body)
             content = result["output"]["message"]["content"][0]["text"]
             input_tokens = result["usage"]["inputTokens"]
             output_tokens = result["usage"]["outputTokens"]
@@ -109,7 +108,7 @@ class BedrockProvider(BaseProvider):
             if system_prompt:
                 body["system"] = system_prompt
 
-            result = await self._loop.run_in_executor(None, self._invoke_sync, body)
+            result = await asyncio.get_running_loop().run_in_executor(None, self._invoke_sync, body)
             content = result["content"][0]["text"]
             input_tokens = result["usage"]["input_tokens"]
             output_tokens = result["usage"]["output_tokens"]
