@@ -56,6 +56,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
+          mask-aws-account-id: true
 
       - name: Set up QEMU (required to run arm64 containers on x86 runners)
         uses: docker/setup-qemu-action@v3

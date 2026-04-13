@@ -100,7 +100,8 @@ module "health_checker" {
 module "ci_cd" {
   source                      = "./modules/ci_cd"
   github_repo                 = "adedaramola/multi-llm-platform"
-  gateway_function_arn        = module.lambda_router.lambda_arn
+  gateway_function_arn        = module.lambda_router.lambda_function_arn
+  gateway_alias_arn           = module.lambda_router.lambda_arn
   health_checker_function_arn = module.health_checker.function_arn
 }
 

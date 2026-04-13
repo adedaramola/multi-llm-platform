@@ -44,19 +44,30 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "LambdaDeploy"
+        # UpdateFunctionCode and PublishVersion must target the base function ARN
+        Sid    = "LambdaDeployCode"
         Effect = "Allow"
         Action = [
           "lambda:UpdateFunctionCode",
           "lambda:GetFunction",
           "lambda:GetFunctionConfiguration",
           "lambda:PublishVersion",
-          "lambda:UpdateAlias",
-          "lambda:GetAlias",
         ]
         Resource = [
           var.gateway_function_arn,
           var.health_checker_function_arn,
+        ]
+      },
+      {
+        # UpdateAlias / GetAlias operate on the alias ARN (qualified)
+        Sid    = "LambdaDeployAlias"
+        Effect = "Allow"
+        Action = [
+          "lambda:UpdateAlias",
+          "lambda:GetAlias",
+        ]
+        Resource = [
+          var.gateway_alias_arn,
         ]
       },
     ]
