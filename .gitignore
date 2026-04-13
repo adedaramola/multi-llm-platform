@@ -31,3 +31,6 @@ ai-platform/dist/
 # IDE
 .vscode/settings.json
 .idea/
+
+# Claude
+claude.md
