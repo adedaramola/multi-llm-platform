@@ -8,10 +8,6 @@ variable "gateway_function_arn" {
   description = "Base ARN of the gateway Lambda function (no qualifier)"
 }
 
-variable "gateway_alias_arn" {
-  type        = string
-  description = "ARN of the gateway Lambda 'live' alias"
-}
 
 variable "health_checker_function_arn" {
   type        = string
