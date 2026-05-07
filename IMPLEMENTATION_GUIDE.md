@@ -19,14 +19,14 @@
 
 ### Live environment
 
-| Resource | Value |
-|----------|-------|
-| API Gateway URL | `https://ozj6y1pi1g.execute-api.us-east-1.amazonaws.com/` |
-| Lambda function | `ai-platform-gateway-production` |
-| CloudWatch dashboard | `https://us-east-1.console.aws.amazon.com/cloudwatch/home#dashboards:name=ai-platform-production` |
-| AWS account | `us-east-1` |
-| Aurora cluster | `ai-platform-pgvector-production` |
-| ElastiCache | `ai-platform-production` |
+Retrieve current values from Terraform after deploy:
+
+```bash
+cd terraform
+terraform output api_gateway_url
+terraform output lambda_function_name
+terraform output cloudwatch_dashboard_url
+```
 
 ---
 
@@ -570,4 +570,4 @@ logger.info("provider_healthy", extra={"provider": name, "latency_ms": ms})
 
 ---
 
-*Last updated: 2026-04-13 — Phase 11 complete. Streaming endpoint live, model_preference routing added, bug fixes applied. Live URL: `https://ozj6y1pi1g.execute-api.us-east-1.amazonaws.com/`*
+*Last updated: 2026-04-13 — Phase 11 complete. Streaming endpoint live, model_preference routing added, bug fixes applied.*
