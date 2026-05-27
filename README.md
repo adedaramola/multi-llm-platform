@@ -215,15 +215,23 @@ docker build -t ai-platform .
 docker run --env-file .env -p 8080:8080 ai-platform
 ```
 
-### 3. Or run directly
+### 3. Set up a local virtual environment
 
 ```bash
 cd ai-platform
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+### 4. Or run directly
+
+```bash
+cd ai-platform
 uvicorn ai_platform.gateway.app:app --reload --port 8080
 ```
 
-### 4. Make a request
+### 5. Make a request
 
 ```bash
 curl -X POST http://localhost:8080/v1/chat \
@@ -234,13 +242,13 @@ curl -X POST http://localhost:8080/v1/chat \
   }'
 ```
 
-> In `dev` environment the auth layer accepts any key prefixed with `dev-`.
+> In `dev` environment the auth layer accepts any bearer key.
 
-### 5. Run tests
+### 6. Run tests
 
 ```bash
 cd ai-platform
-pytest tests/ -v
+.venv/bin/python -m pytest tests/ -v --tb=short
 ```
 
 ---
@@ -265,6 +273,7 @@ All configuration is via environment variables (or a `.env` file). Loaded once a
 | `PG_SECRET_ARN` | `""` | RDS-managed secret ARN — DSN resolved at cold start |
 | `SEMANTIC_CACHE_THRESHOLD` | `0.92` | Cosine similarity threshold for cache hits |
 | `CACHE_ENABLED` | `true` | Set to `false` to disable all caching |
+| `CACHE_WRITE_TIMEOUT_MS` | `750` | Upper bound for inline cache persistence before the response continues |
 | `API_KEYS_TABLE` | `ai-platform-api-keys` | DynamoDB table for API key validation |
 | `RATE_LIMIT_TABLE` | `ai-platform-rate-limits` | DynamoDB table for rate limit counters |
 | `HEALTH_TABLE` | `ai-platform-provider-health` | DynamoDB table for provider health state |
@@ -274,6 +283,8 @@ All configuration is via environment variables (or a `.env` file). Loaded once a
 | `COMPLEXITY_MID_THRESHOLD` | `0.7` | Complexity score below which mid-tier is used |
 | `MAX_PROVIDER_RETRIES` | `2` | Retries per provider before marking unhealthy |
 | `PROVIDER_TIMEOUT_SECONDS` | `30` | Hard timeout per provider call |
+| `CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `3` | Consecutive failures before a provider is locally opened |
+| `CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `60` | Cooldown before a locally opened provider is retried |
 | `EMBEDDING_MODEL` | `amazon.titan-embed-text-v1` | Bedrock embedding model for semantic cache |
 
 ---
@@ -312,7 +323,7 @@ For a full module-by-module breakdown of what Terraform provisions, see [ARCHITE
 
 Metrics are emitted via CloudWatch EMF through Lambda stdout (no agent needed) in the `ai-platform/inference` namespace, dimensioned by `provider`, `model`, and `tier`. Key metrics: `RequestCount`, `InputTokens`, `OutputTokens`, `LatencyMs`, `CacheHit`, `EstimatedCostUSD`, `ErrorCount`.
 
-CloudWatch Alarms fire to SNS on error rate >5%, p99 latency >10s, all providers unhealthy, or projected cost overrun. X-Ray active tracing covers `auth_check`, `cache_lookup`, `routing_decision`, `provider_call`, and `cache_write` segments.
+CloudWatch Alarms fire to SNS on error rate >5%, p99 latency >10s, all providers unhealthy, or projected cost overrun. Lambda X-Ray active tracing is enabled at the infrastructure layer; explicit application segments are tracked as follow-up work in the improvement roadmap.
 
 See [ARCHITECTURE.md §5](ARCHITECTURE.md#5-observability-and-monitoring) for the full metric spec, alarm thresholds, and dashboard layout.
 
@@ -320,7 +331,7 @@ See [ARCHITECTURE.md §5](ARCHITECTURE.md#5-observability-and-monitoring) for th
 
 ## Roadmap
 
-See [ARCHITECTURE.md §11](ARCHITECTURE.md#11-platform-evolution-roadmap) for the three-phase evolution plan (current state through scaled platform service) and [IMPLEMENTATION_GUIDE.md](IMPLEMENTATION_GUIDE.md#build-status) for the live build status of each phase.
+See [IMPROVEMENT_ROADMAP.md](IMPROVEMENT_ROADMAP.md) for the current execution plan and [ARCHITECTURE.md §11](ARCHITECTURE.md#11-platform-evolution-roadmap) for the longer-range platform evolution view.
 
 ---
 

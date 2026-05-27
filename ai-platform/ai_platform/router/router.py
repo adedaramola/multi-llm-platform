@@ -50,6 +50,30 @@ class LLMRouter:
                     return p
         return None
 
+    async def _stream_with_timeout(
+        self,
+        stream: AsyncIterator[str],
+        timeout: float,
+    ) -> AsyncIterator[str]:
+        """
+        Enforce a total timeout across the full provider stream so a hung stream
+        doesn't hold the request open forever.
+        """
+        iterator = stream.__aiter__()
+        deadline = asyncio.get_running_loop().time() + timeout
+
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError("provider stream timed out")
+
+            try:
+                chunk = await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
+            except StopAsyncIteration:
+                return
+
+            yield chunk
+
     async def route(
         self,
         request: InferenceRequest,
@@ -171,14 +195,23 @@ class LLMRouter:
                 if on_provider_selected:
                     on_provider_selected(preferred.name, preferred.tier)
                 try:
-                    async for chunk in preferred.stream(
-                        messages=messages,
-                        max_tokens=request.max_tokens,
-                        temperature=request.temperature,
+                    async for chunk in self._stream_with_timeout(
+                        preferred.stream(
+                            messages=messages,
+                            max_tokens=request.max_tokens,
+                            temperature=request.temperature,
+                        ),
+                        timeout,
                     ):
                         yield chunk
                     registry.mark_success(preferred.name)
                     return
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "preferred_provider_stream_timeout",
+                        extra={"provider": preferred.name},
+                    )
+                    registry.mark_failure(preferred.name)
                 except Exception as exc:
                     logger.warning(
                         "preferred_provider_stream_error",
@@ -194,14 +227,20 @@ class LLMRouter:
                 if on_provider_selected:
                     on_provider_selected(provider.name, tier)
                 try:
-                    async for chunk in provider.stream(
-                        messages=messages,
-                        max_tokens=request.max_tokens,
-                        temperature=request.temperature,
+                    async for chunk in self._stream_with_timeout(
+                        provider.stream(
+                            messages=messages,
+                            max_tokens=request.max_tokens,
+                            temperature=request.temperature,
+                        ),
+                        timeout,
                     ):
                         yield chunk
                     registry.mark_success(provider.name)
                     return
+                except asyncio.TimeoutError:
+                    logger.warning("provider_stream_timeout", extra={"provider": provider.name})
+                    registry.mark_failure(provider.name)
                 except Exception as exc:
                     logger.warning(
                         "provider_stream_error",

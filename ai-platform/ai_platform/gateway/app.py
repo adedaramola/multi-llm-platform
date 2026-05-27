@@ -13,9 +13,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-import boto3
-
-from fastapi import Depends, FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from mangum import Mangum
 
@@ -31,6 +29,7 @@ from ..models.schemas import (
     InferenceResponse,
     UsageStats,
 )
+from ..providers.base import BaseProvider
 from ..providers.anthropic_provider import AnthropicProvider, haiku_config, opus_config, sonnet_config
 from ..providers.bedrock_provider import BedrockProvider, bedrock_haiku_config, nova_micro_config
 from ..providers.openai_provider import OpenAIProvider, gpt4o_config, gpt4o_mini_config
@@ -69,6 +68,49 @@ def _resolve_pg_dsn(settings) -> str:
     except Exception as exc:
         logger.error("pg_secret_fetch_failed", extra={"error": str(exc)})
         return ""
+
+
+def _all_providers(router: LLMRouter) -> list[BaseProvider]:
+    providers: list[BaseProvider] = []
+    for tier_providers in router._tiers.values():
+        providers.extend(tier_providers)
+    return providers
+
+
+def _find_provider(router: LLMRouter, provider_name: str) -> BaseProvider | None:
+    return next((provider for provider in _all_providers(router) if provider.name == provider_name), None)
+
+
+async def _safe_cache_write(
+    cache: SemanticCache,
+    *,
+    prompt: str,
+    response: str,
+    model_used: str,
+    input_tokens: int,
+    output_tokens: int,
+) -> None:
+    settings = get_settings()
+    timeout_seconds = max(settings.cache_write_timeout_ms, 1) / 1000
+
+    try:
+        await asyncio.wait_for(
+            cache.write(
+                prompt=prompt,
+                response=response,
+                model_used=model_used,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            ),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "cache_write_timeout",
+            extra={"model_used": model_used, "timeout_ms": settings.cache_write_timeout_ms},
+        )
+    except Exception as exc:
+        logger.warning("cache_write_failed", extra={"error": str(exc), "model_used": model_used})
 
 
 @asynccontextmanager
@@ -166,10 +208,7 @@ async def health_check(request: Request) -> HealthResponse:
     registry.refresh()
 
     provider_statuses = {}
-    all_providers = []
-    for tier_providers in request.app.state.router._tiers.values():
-        all_providers.extend(tier_providers)
-    for provider in all_providers:
+    for provider in _all_providers(request.app.state.router):
         provider_statuses[provider.name] = registry.is_healthy(provider.name)
 
     healthy_count = sum(provider_statuses.values())
@@ -263,23 +302,18 @@ async def chat_completion(
     latency_ms = int((time.perf_counter() - start_time) * 1000)
 
     # Find the provider config to compute cost
-    all_providers = []
-    for tp in router._tiers.values():
-        all_providers.extend(tp)
-    provider_obj = next((p for p in all_providers if p.name == selected_provider_name[0]), None)
+    provider_obj = _find_provider(router, selected_provider_name[0])
     cost = 0.0
     if provider_obj:
         cost = provider_response.estimated_cost(provider_obj.config)
 
-    # ── Async cache write (fire and forget) ───────────────────────────────────
-    asyncio.create_task(
-        cache.write(
-            prompt=body.prompt_text,
-            response=provider_response.content,
-            model_used=provider_response.model_id,
-            input_tokens=provider_response.input_tokens,
-            output_tokens=provider_response.output_tokens,
-        )
+    await _safe_cache_write(
+        cache,
+        prompt=body.prompt_text,
+        response=provider_response.content,
+        model_used=provider_response.model_id,
+        input_tokens=provider_response.input_tokens,
+        output_tokens=provider_response.output_tokens,
     )
 
     emit_request_metric(
@@ -355,7 +389,11 @@ async def chat_completion_stream(
             yield f"data: {cached.response}\n\n"
             yield "data: [DONE]\n\n"
 
-        return StreamingResponse(_cached_sse(), media_type="text/event-stream")
+        return StreamingResponse(
+            _cached_sse(),
+            media_type="text/event-stream",
+            headers={"X-Request-ID": request_id, "Cache-Control": "no-cache"},
+        )
 
     selected_provider_name = ["unknown"]
     selected_tier = ["unknown"]
@@ -365,8 +403,10 @@ async def chat_completion_stream(
         selected_tier[0] = tier
 
     async def _sse_generator():
+        streamed_chunks: list[str] = []
         try:
             async for chunk in router.route_stream(body, on_provider_selected=on_provider_selected):
+                streamed_chunks.append(chunk)
                 # Escape newlines inside the chunk so SSE framing is not broken
                 escaped = chunk.replace("\n", "\\n")
                 yield f"data: {escaped}\n\n"
@@ -382,11 +422,21 @@ async def chat_completion_stream(
             return
 
         latency_ms = int((time.perf_counter() - start_time) * 1000)
+        provider_obj = _find_provider(router, selected_provider_name[0])
+        model_id = provider_obj.config.model_id if provider_obj else selected_provider_name[0]
+        await _safe_cache_write(
+            cache,
+            prompt=body.prompt_text,
+            response="".join(streamed_chunks),
+            model_used=model_id,
+            input_tokens=0,
+            output_tokens=0,
+        )
         emit_request_metric(
             request_id=request_id,
             caller_id=caller.caller_id,
             provider=selected_provider_name[0],
-            model=selected_provider_name[0],
+            model=model_id,
             tier=selected_tier[0],
             input_tokens=0,  # streaming — token counts not available mid-stream
             output_tokens=0,

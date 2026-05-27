@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     pg_secret_arn: str = ""               # RDS-managed master user secret ARN
     semantic_cache_threshold: float = 0.92
     cache_enabled: bool = True
+    cache_write_timeout_ms: int = 750
 
     # ── DynamoDB ──────────────────────────────────────────────────────────────
     api_keys_table: str = "ai-platform-api-keys"
@@ -46,6 +47,8 @@ class Settings(BaseSettings):
     complexity_mid_threshold: float = 0.7
     max_provider_retries: int = 2
     provider_timeout_seconds: int = 30
+    circuit_breaker_failure_threshold: int = 3
+    circuit_breaker_cooldown_seconds: int = 60
 
     # ── Embeddings ────────────────────────────────────────────────────────────
     embedding_model: str = "amazon.titan-embed-text-v1"  # Bedrock — no extra cost

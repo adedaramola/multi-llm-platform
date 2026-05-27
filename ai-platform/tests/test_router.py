@@ -11,6 +11,13 @@ from ai_platform.providers.base import ProviderConfig, ProviderResponse
 from ai_platform.router.router import LLMRouter
 
 
+async def _stream_from_chunks(*chunks: str, delay: float = 0.0):
+    for chunk in chunks:
+        if delay:
+            await asyncio.sleep(delay)
+        yield chunk
+
+
 def _make_provider(name: str, tier: str, healthy: bool = True) -> MagicMock:
     cfg = ProviderConfig(
         name=name,
@@ -24,6 +31,9 @@ def _make_provider(name: str, tier: str, healthy: bool = True) -> MagicMock:
     provider.name = name
     provider.tier = tier
     provider.config = cfg
+    provider.cost_per_token = (
+        cfg.cost_per_input_token + cfg.cost_per_output_token
+    ) / 2
     provider.complete = AsyncMock(return_value=ProviderResponse(
         content="test response",
         input_tokens=10,
@@ -31,13 +41,18 @@ def _make_provider(name: str, tier: str, healthy: bool = True) -> MagicMock:
         model_id=f"test/{name}",
         provider_name=name,
     ))
+    provider.stream = MagicMock(side_effect=lambda **kwargs: _stream_from_chunks("test response"))
     return provider
 
 
-def _req(content: str = "hello", budget: BudgetHint = BudgetHint.STANDARD) -> InferenceRequest:
+def _req(
+    content: str = "hello",
+    budget: BudgetHint = BudgetHint.STANDARD,
+    latency_sla_ms: int = 5000,
+) -> InferenceRequest:
     return InferenceRequest(
         messages=[{"role": "user", "content": content}],
-        metadata=RequestMetadata(budget=budget),
+        metadata=RequestMetadata(budget=budget, latency_sla_ms=latency_sla_ms),
     )
 
 
@@ -109,3 +124,27 @@ class TestLLMRouter:
         assert len(selected) == 1
         assert selected[0][0] == "cheap-model"
         assert selected[0][1] == "low"
+
+    def test_stream_timeout_falls_back_to_next_provider(self, providers):
+        async def slow_stream(**kwargs):
+            await asyncio.sleep(0.6)
+            yield "too slow"
+
+        async def fast_stream(**kwargs):
+            yield "mid response"
+
+        providers["low"][0].stream = MagicMock(side_effect=slow_stream)
+        providers["mid"][0].stream = MagicMock(side_effect=fast_stream)
+
+        with patch("ai_platform.router.router.get_health_registry") as mock_reg:
+            mock_reg.return_value.is_healthy.return_value = True
+            router = LLMRouter(providers)
+            chunks = asyncio.run(_collect_stream(router, _req(latency_sla_ms=500)))
+
+        assert chunks == ["mid response"]
+        providers["low"][0].stream.assert_called_once()
+        providers["mid"][0].stream.assert_called_once()
+
+
+async def _collect_stream(router: LLMRouter, request: InferenceRequest) -> list[str]:
+    return [chunk async for chunk in router.route_stream(request)]

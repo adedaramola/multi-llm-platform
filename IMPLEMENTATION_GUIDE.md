@@ -296,7 +296,7 @@ echo -n "arn:aws:iam::YOUR_ACCOUNT_ID:role/ai-platform-github-actions" \
 
 The workflow at `.github/workflows/deploy.yml` has two jobs:
 
-- **`test`** — runs on every push and PR; installs dependencies, runs `pytest`
+- **`test`** — runs on every push and PR; installs dependencies, runs `.venv/bin/python -m pytest tests/ -v --tb=short`
 - **`deploy`** — runs only on pushes to `main` after `test` passes; builds the arm64 zip using Docker + QEMU, deploys both Lambdas, smoke-tests `/health`
 
 > GitHub Actions runners are x86. QEMU (`docker/setup-qemu-action@v3`) is required to run `linux/arm64` containers on them. Without it, the Docker build silently produces an x86 binary that fails with `exec format error` at Lambda runtime.
@@ -368,7 +368,7 @@ cd ../terraform && terraform apply
 
 ```bash
 cd ai-platform
-python -m pytest tests/ -v --tb=short
+.venv/bin/python -m pytest tests/ -v --tb=short
 ```
 
 | File | Tests | Covers |
@@ -441,6 +441,10 @@ aws lambda update-function-code \
   --function-name "$FUNCTION_NAME" \
   --zip-file fileb://ai-platform/dist/ai-platform.zip \
   --architectures arm64
+
+# Run tests with the project virtual environment
+cd ../ai-platform
+.venv/bin/python -m pytest tests/ -v --tb=short
 
 # Check cache hit rate (last hour)
 START=$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)   # macOS
