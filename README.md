@@ -317,6 +317,17 @@ CI handles this automatically on merge to `main`. For a manual push see the [Qui
 
 For a full module-by-module breakdown of what Terraform provisions, see [ARCHITECTURE.md §8](ARCHITECTURE.md#8-terraform-infrastructure-structure).
 
+### Current Deployment Status (May 27, 2026)
+
+The platform has been successfully deployed and validated in AWS. Retrieve the live values for your current environment from Terraform outputs:
+
+```bash
+cd terraform
+terraform output -raw api_gateway_url
+terraform output -raw lambda_function_name
+terraform output -raw cloudwatch_dashboard_url
+```
+
 ---
 
 ## Observability
@@ -326,6 +337,61 @@ Metrics are emitted via CloudWatch EMF through Lambda stdout (no agent needed) i
 CloudWatch Alarms fire to SNS on error rate >5%, p99 latency >10s, all providers unhealthy, or projected cost overrun. Lambda X-Ray active tracing is enabled at the infrastructure layer; explicit application segments are tracked as follow-up work in the improvement roadmap.
 
 See [ARCHITECTURE.md §5](ARCHITECTURE.md#5-observability-and-monitoring) for the full metric spec, alarm thresholds, and dashboard layout.
+
+### Verified Smoke Checks
+
+The deployed API has been validated with live checks:
+
+- `GET /health` returns `200` with provider health status.
+- `POST /v1/chat` without auth returns `401`.
+- Authenticated `POST /v1/chat` returns `200` and model output.
+- `POST /v1/chat/stream` returns SSE and ends with `data: [DONE]`.
+- Cache behavior verified (`cache_hit` false on first request, true on repeated prompt).
+
+### Canonical Post-Deploy Smoke Suite
+
+Use this sequence after each `terraform apply` or production deploy:
+
+```bash
+# 1) Resolve runtime values from Terraform outputs
+API_URL=$(cd terraform && terraform output -raw api_gateway_url)
+FUNCTION_NAME=$(cd terraform && terraform output -raw lambda_function_name)
+
+# 2) Health endpoint
+curl -sS "$API_URL/health"
+
+# 3) Unauthorized request should return 401
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  -X POST "$API_URL/v1/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"hello"}]}'
+
+# 4) Authorized request should return 200 (set API_KEY first)
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  -X POST "$API_URL/v1/chat" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Return one word: healthy"}]}'
+
+# 5) Streaming endpoint should emit tokens and end with [DONE]
+curl -N -X POST "$API_URL/v1/chat/stream" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"messages":[{"role":"user","content":"Stream a short greeting."}]}'
+
+# 6) Confirm recent Lambda logs
+aws logs tail "/aws/lambda/$FUNCTION_NAME" --since 10m
+```
+
+### Deployment Handoff Checklist
+
+- [ ] `terraform apply` completed cleanly with expected plan.
+- [ ] `GET /health` returned `200` and providers are not all unhealthy.
+- [ ] Auth behavior validated (`401` without token, `200` with valid token).
+- [ ] Streaming endpoint returned SSE events and terminated with `[DONE]`.
+- [ ] CloudWatch dashboard URL resolves from `terraform output -raw cloudwatch_dashboard_url`.
+- [ ] No unexpected error spikes in Lambda logs for the deploy window.
 
 ---
 

@@ -12,8 +12,8 @@
 | Phase 5 — Monitoring | ✅ Done | CloudWatch dashboard + SNS alerts live |
 | Phase 6 — Semantic Cache | ✅ Done | Redis + Aurora cache live; cache hit confirmed (934ms → 143ms) |
 | Phase 7 — Health Checker | ✅ Done | Scheduled Lambda, Nova Micro, all 3 providers healthy |
-| Phase 8 — CI/CD | ✅ Done | GitHub Actions OIDC pipeline green; 18/18 tests, full deploy, smoke test |
-| Phase 9 — Tests | ✅ Done | 18 pytest tests covering policies + router; passing in CI |
+| Phase 8 — CI/CD | ✅ Done | GitHub Actions OIDC pipeline green; 27/27 tests, full deploy, smoke test |
+| Phase 9 — Tests | ✅ Done | 27 pytest tests covering policies, router, health registry, and gateway endpoints; passing in CI |
 | Phase 10 — Hardening | ✅ Done | Provisioned concurrency (2 warm instances); WAF skipped — not supported on API GW v2 HTTP APIs |
 | Phase 11 — Improvements | ✅ Done | Bug fixes, streaming endpoint, model_preference routing, settings-driven thresholds |
 
@@ -374,11 +374,36 @@ cd ai-platform
 | File | Tests | Covers |
 |------|-------|--------|
 | `tests/test_policies.py` | 13 | `estimate_complexity()` scoring, `select_tier()` tier selection |
-| `tests/test_router.py` | 5 | End-to-end routing, provider fallback, exhausted-providers error, callback |
+| `tests/test_router.py` | 6 | End-to-end routing, provider fallback, exhausted-providers error, callback, stream-timeout fallback |
+| `tests/test_health.py` | 2 | Local circuit-breaker open/half-open/close behavior |
+| `tests/test_gateway.py` | 6 | `/health`, `/v1/chat`, `/v1/chat/stream` endpoint behavior and cache/auth flows |
 
-All 18 tests run in under 2 seconds with no network calls — providers are fully mocked via `AsyncMock`. Tests run automatically in CI on every push and PR.
+All 27 tests run in under a few seconds with no external provider calls — dependencies are mocked for deterministic behavior. Tests run automatically in CI on every push and PR.
 
 > When using `pytest.raises(RuntimeError, match=...)`, match on `"All providers exhausted"` — that is the actual error message raised by the router.
+
+### Live AWS Validation (May 27, 2026)
+
+Terraform apply completed successfully and provisioned all platform resources for production in `us-east-1`.
+
+Retrieve current deployment values:
+
+```bash
+cd terraform
+terraform output -raw api_gateway_url
+terraform output -raw lambda_function_name
+terraform output -raw cloudwatch_dashboard_url
+```
+
+Validated behaviors against the live deployment:
+
+- `/health` returns `200` and healthy provider map.
+- Auth enforcement returns `401` for missing/invalid tokens.
+- Authenticated inference returns `200`.
+- Rate limiting returns `429` after configured RPM threshold.
+- Streaming endpoint returns SSE and terminates with `[DONE]`.
+- Routing preference honors pinned model/provider selection.
+- Temporary smoke-test keys were revoked after validation.
 
 ---
 
@@ -464,6 +489,48 @@ aws dynamodb update-item \
 # Destroy all infrastructure
 cd terraform && terraform destroy
 ```
+
+### Canonical post-deploy smoke test
+
+```bash
+# Resolve current environment outputs
+API_URL=$(cd terraform && terraform output -raw api_gateway_url)
+FUNCTION_NAME=$(cd terraform && terraform output -raw lambda_function_name)
+
+# Health check
+curl -sS "$API_URL/health"
+
+# Unauthorized check (expect 401)
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  -X POST "$API_URL/v1/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"hello"}]}'
+
+# Authorized check (expect 200; API_KEY must be set)
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  -X POST "$API_URL/v1/chat" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Return one word: healthy"}]}'
+
+# Streaming check (expect SSE tokens ending in [DONE])
+curl -N -X POST "$API_URL/v1/chat/stream" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"messages":[{"role":"user","content":"Stream a short greeting."}]}'
+
+# Logs check for deploy window
+aws logs tail "/aws/lambda/$FUNCTION_NAME" --since 10m
+```
+
+### Deployment handoff checklist
+
+- [ ] `terraform apply` succeeded with expected resources.
+- [ ] Smoke suite passed (`/health`, auth, `/v1/chat`, `/v1/chat/stream`).
+- [ ] Dashboard URL retrieved from `terraform output -raw cloudwatch_dashboard_url`.
+- [ ] Lambda logs for the last 10 minutes show no unexpected errors.
+- [ ] Any temporary test API keys were revoked after validation.
 
 ### Streaming endpoint
 
@@ -574,4 +641,4 @@ logger.info("provider_healthy", extra={"provider": name, "latency_ms": ms})
 
 ---
 
-*Last updated: 2026-04-13 — Phase 11 complete. Streaming endpoint live, model_preference routing added, bug fixes applied.*
+*Last updated: 2026-05-27 — Terraform apply complete, 27 tests, AWS smoke/reliability suite validated.*

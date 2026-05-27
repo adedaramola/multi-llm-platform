@@ -15,6 +15,9 @@ build/
 
 # Terraform — state files contain secrets and resource IDs
 terraform.tfvars
+terraform/terraform.tfvars
+terraform/*.tfvars
+terraform/*.tfvars.json
 *.tfstate
 *.tfstate.backup
 .terraform/

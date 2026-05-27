@@ -17,8 +17,9 @@ Planned work:
 - [x] Replace fire-and-forget cache writes with bounded awaited persistence.
 - [x] Add local circuit-breaker cooldown logic on provider failures.
 - [x] Add tests for streaming fallback and circuit-breaker recovery.
-- [ ] Add FastAPI endpoint tests for `/v1/chat`, `/v1/chat/stream`, and `/health`.
+- [x] Add FastAPI endpoint tests for `/v1/chat`, `/v1/chat/stream`, and `/health`.
 - [ ] Add explicit application-level tracing spans or narrow the tracing claims in docs.
+- [x] Validate the reliability hardening in AWS with live smoke and routing/rate-limit/cache/stream checks (May 27, 2026).
 
 ## Next: Production Confidence
 
