@@ -20,6 +20,9 @@ Planned work:
 - [x] Add FastAPI endpoint tests for `/v1/chat`, `/v1/chat/stream`, and `/health`.
 - [ ] Add explicit application-level tracing spans or narrow the tracing claims in docs.
 - [x] Validate the reliability hardening in AWS with live smoke and routing/rate-limit/cache/stream checks (May 27, 2026).
+- [x] Fix PG_DSN resolution so the pgvector semantic layer actually receives the Aurora DSN (July 16, 2026).
+- [x] Include the caller's model constraint in cache keys so pinned requests never get another model's cached answer (July 16, 2026).
+- [x] Stop mid-stream provider failover from duplicating output and caching corrupted responses (July 16, 2026).
 
 ## Next: Production Confidence
 
