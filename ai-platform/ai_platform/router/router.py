@@ -17,6 +17,14 @@ from .policies import estimate_complexity, select_tier
 logger = logging.getLogger(__name__)
 
 
+class StreamInterruptedError(RuntimeError):
+    """
+    A provider stream failed after chunks were already sent to the client.
+    Failover is no longer possible — restarting on another provider would
+    duplicate the partial output the client has already received.
+    """
+
+
 class LLMRouter:
     def __init__(self, providers_by_tier: dict[str, list[BaseProvider]]) -> None:
         """
@@ -194,6 +202,7 @@ class LLMRouter:
             if preferred:
                 if on_provider_selected:
                     on_provider_selected(preferred.name, preferred.tier)
+                yielded_any = False
                 try:
                     async for chunk in self._stream_with_timeout(
                         preferred.stream(
@@ -203,21 +212,30 @@ class LLMRouter:
                         ),
                         timeout,
                     ):
+                        yielded_any = True
                         yield chunk
                     registry.mark_success(preferred.name)
                     return
                 except asyncio.TimeoutError:
                     logger.warning(
                         "preferred_provider_stream_timeout",
-                        extra={"provider": preferred.name},
+                        extra={"provider": preferred.name, "mid_stream": yielded_any},
                     )
                     registry.mark_failure(preferred.name)
+                    if yielded_any:
+                        raise StreamInterruptedError(
+                            f"{preferred.name} timed out mid-stream"
+                        )
                 except Exception as exc:
                     logger.warning(
                         "preferred_provider_stream_error",
-                        extra={"provider": preferred.name, "error": str(exc)},
+                        extra={"provider": preferred.name, "error": str(exc), "mid_stream": yielded_any},
                     )
                     registry.mark_failure(preferred.name)
+                    if yielded_any:
+                        raise StreamInterruptedError(
+                            f"{preferred.name} failed mid-stream: {exc}"
+                        ) from exc
 
         # Tier-based selection
         tier_order = self._build_fallback_chain(target_tier)
@@ -226,6 +244,7 @@ class LLMRouter:
             for provider in candidates:
                 if on_provider_selected:
                     on_provider_selected(provider.name, tier)
+                yielded_any = False
                 try:
                     async for chunk in self._stream_with_timeout(
                         provider.stream(
@@ -235,18 +254,30 @@ class LLMRouter:
                         ),
                         timeout,
                     ):
+                        yielded_any = True
                         yield chunk
                     registry.mark_success(provider.name)
                     return
                 except asyncio.TimeoutError:
-                    logger.warning("provider_stream_timeout", extra={"provider": provider.name})
+                    logger.warning(
+                        "provider_stream_timeout",
+                        extra={"provider": provider.name, "mid_stream": yielded_any},
+                    )
                     registry.mark_failure(provider.name)
+                    if yielded_any:
+                        raise StreamInterruptedError(
+                            f"{provider.name} timed out mid-stream"
+                        )
                 except Exception as exc:
                     logger.warning(
                         "provider_stream_error",
-                        extra={"provider": provider.name, "error": str(exc)},
+                        extra={"provider": provider.name, "error": str(exc), "mid_stream": yielded_any},
                     )
                     registry.mark_failure(provider.name)
+                    if yielded_any:
+                        raise StreamInterruptedError(
+                            f"{provider.name} failed mid-stream: {exc}"
+                        ) from exc
 
         raise RuntimeError("All providers exhausted for streaming request.")
 

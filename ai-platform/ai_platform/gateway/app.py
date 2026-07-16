@@ -33,7 +33,7 @@ from ..providers.anthropic_provider import AnthropicProvider, haiku_config, opus
 from ..providers.bedrock_provider import BedrockProvider, bedrock_haiku_config, nova_micro_config
 from ..providers.openai_provider import OpenAIProvider, gpt4o_config, gpt4o_mini_config
 from ..router.health import get_health_registry
-from ..router.router import LLMRouter
+from ..router.router import LLMRouter, StreamInterruptedError
 from ..utils import fetch_secret
 
 logging.basicConfig(
@@ -413,6 +413,18 @@ async def chat_completion_stream(
                 # Escape newlines inside the chunk so SSE framing is not broken
                 escaped = chunk.replace("\n", "\\n")
                 yield f"data: {escaped}\n\n"
+        except StreamInterruptedError as exc:
+            # Provider died after chunks reached the client — the partial
+            # output must not be cached and cannot be transparently retried.
+            emit_error_metric(
+                request_id=request_id,
+                caller_id=caller.caller_id,
+                error_type="stream_interrupted",
+                status_code=502,
+            )
+            logger.error("stream_interrupted", extra={"error": str(exc), "request_id": request_id})
+            yield "data: [ERROR] Stream interrupted\n\n"
+            return
         except RuntimeError as exc:
             emit_error_metric(
                 request_id=request_id,

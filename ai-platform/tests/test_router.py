@@ -8,7 +8,7 @@ import pytest
 
 from ai_platform.models.schemas import BudgetHint, InferenceRequest, RequestMetadata
 from ai_platform.providers.base import ProviderConfig, ProviderResponse
-from ai_platform.router.router import LLMRouter
+from ai_platform.router.router import LLMRouter, StreamInterruptedError
 
 
 async def _stream_from_chunks(*chunks: str, delay: float = 0.0):
@@ -145,6 +145,80 @@ class TestLLMRouter:
         providers["low"][0].stream.assert_called_once()
         providers["mid"][0].stream.assert_called_once()
 
+    def test_stream_error_before_first_chunk_falls_back(self, providers):
+        async def broken_stream(**kwargs):
+            raise ConnectionError("refused")
+            yield  # pragma: no cover — makes this an async generator
+
+        async def good_stream(**kwargs):
+            yield "mid response"
+
+        providers["low"][0].stream = MagicMock(side_effect=broken_stream)
+        providers["mid"][0].stream = MagicMock(side_effect=good_stream)
+
+        with patch("ai_platform.router.router.get_health_registry") as mock_reg:
+            mock_reg.return_value.is_healthy.return_value = True
+            router = LLMRouter(providers)
+            chunks = asyncio.run(_collect_stream(router, _req(budget=BudgetHint.LOW)))
+
+        assert chunks == ["mid response"]
+
+    def test_stream_error_mid_stream_raises_without_fallback(self, providers):
+        async def dying_stream(**kwargs):
+            yield "partial-1"
+            yield "partial-2"
+            raise ConnectionError("connection dropped")
+
+        providers["low"][0].stream = MagicMock(side_effect=dying_stream)
+
+        with patch("ai_platform.router.router.get_health_registry") as mock_reg:
+            mock_reg.return_value.is_healthy.return_value = True
+            router = LLMRouter(providers)
+            chunks, interrupted = asyncio.run(
+                _collect_stream_until_error(router, _req(budget=BudgetHint.LOW))
+            )
+
+        # Chunks already sent are preserved; no second provider is tried —
+        # restarting would duplicate the partial output at the client.
+        assert chunks == ["partial-1", "partial-2"]
+        assert interrupted is True
+        providers["mid"][0].stream.assert_not_called()
+        providers["high"][0].stream.assert_not_called()
+
+    def test_stream_timeout_mid_stream_raises_without_fallback(self, providers):
+        async def stalling_stream(**kwargs):
+            yield "partial-1"
+            await asyncio.sleep(5)
+            yield "never delivered"
+
+        providers["low"][0].stream = MagicMock(side_effect=stalling_stream)
+
+        with patch("ai_platform.router.router.get_health_registry") as mock_reg:
+            mock_reg.return_value.is_healthy.return_value = True
+            router = LLMRouter(providers)
+            chunks, interrupted = asyncio.run(
+                _collect_stream_until_error(
+                    router, _req(budget=BudgetHint.LOW, latency_sla_ms=500)
+                )
+            )
+
+        assert chunks == ["partial-1"]
+        assert interrupted is True
+        providers["mid"][0].stream.assert_not_called()
+
 
 async def _collect_stream(router: LLMRouter, request: InferenceRequest) -> list[str]:
     return [chunk async for chunk in router.route_stream(request)]
+
+
+async def _collect_stream_until_error(
+    router: LLMRouter, request: InferenceRequest
+) -> tuple[list[str], bool]:
+    """Collect chunks, returning (chunks, was_interrupted_mid_stream)."""
+    chunks: list[str] = []
+    try:
+        async for chunk in router.route_stream(request):
+            chunks.append(chunk)
+    except StreamInterruptedError:
+        return chunks, True
+    return chunks, False

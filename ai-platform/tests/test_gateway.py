@@ -61,6 +61,7 @@ from ai_platform.auth.authenticator import CallerIdentity
 from ai_platform.gateway import app as gateway
 from ai_platform.models.schemas import InferenceRequest
 from ai_platform.providers.base import ProviderConfig, ProviderResponse
+from ai_platform.router.router import StreamInterruptedError
 
 
 @dataclass
@@ -120,6 +121,7 @@ class FakeRouter:
         stream_chunks: list[str] | None = None,
         route_error: Exception | None = None,
         stream_error: Exception | None = None,
+        stream_error_after_chunks: Exception | None = None,
     ) -> None:
         self.provider = SimpleNamespace(
             name=provider_name,
@@ -142,6 +144,7 @@ class FakeRouter:
         self._stream_chunks = stream_chunks or ["chunk-a", "chunk-b"]
         self._route_error = route_error
         self._stream_error = stream_error
+        self._stream_error_after_chunks = stream_error_after_chunks
         self.route_calls = 0
         self.stream_calls = 0
 
@@ -161,6 +164,8 @@ class FakeRouter:
             raise self._stream_error
         for chunk in self._stream_chunks:
             yield chunk
+        if self._stream_error_after_chunks:
+            raise self._stream_error_after_chunks
 
 
 class FakeRegistry:
@@ -408,3 +413,33 @@ def test_stream_cache_miss_streams_chunks_and_writes_cache():
     assert len(cache.writes) == 1
     assert cache.writes[0]["response"] == "helloworld"
     assert cache.writes[0]["model_used"] == "test/cheap-model"
+
+
+def test_stream_interrupted_mid_stream_emits_error_and_skips_cache():
+    router = FakeRouter(
+        stream_chunks=["partial output"],
+        stream_error_after_chunks=StreamInterruptedError("provider died mid-stream"),
+    )
+    cache = FakeCache(lookup_result=None)
+    limiter = FakeRateLimiter()
+    registry = FakeRegistry({"cheap-model": True})
+    gateway.app.dependency_overrides[gateway.get_caller_identity] = _auth_override
+
+    with (
+        patch.object(gateway, "get_health_registry", return_value=registry),
+        patch.object(gateway, "emit_request_metric", return_value=None),
+        patch.object(gateway, "emit_error_metric", return_value=None) as error_metric,
+        TestClient(gateway.app) as client,
+    ):
+        gateway.app.state.router = router
+        gateway.app.state.cache = cache
+        gateway.app.state.rate_limiter = limiter
+        resp = client.post("/v1/chat/stream", json=_request_body("interrupt me"))
+
+    _teardown_app_state()
+    assert resp.status_code == 200  # headers already sent when the stream died
+    assert "data: partial output" in resp.text
+    assert "data: [ERROR] Stream interrupted" in resp.text
+    assert "data: [DONE]" not in resp.text
+    assert cache.writes == []  # partial output must never be cached
+    assert error_metric.call_args.kwargs["error_type"] == "stream_interrupted"
