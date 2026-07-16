@@ -1,0 +1,104 @@
+"""
+Unit tests for cache/semantic_cache.py using in-memory fakes.
+No Redis, Postgres, or AWS access — fakes are injected onto the instance.
+"""
+from __future__ import annotations
+
+import asyncio
+
+from ai_platform.cache.semantic_cache import SemanticCache
+from ai_platform.config.settings import Settings, get_settings
+
+
+class FakeRedis:
+    def __init__(self) -> None:
+        self.store: dict[str, str] = {}
+
+    async def get(self, key: str) -> str | None:
+        return self.store.get(key)
+
+    async def setex(self, key: str, ttl: int, value: str) -> None:
+        self.store[key] = value
+
+
+def _make_cache(pg_dsn: str = "", with_redis: bool = True) -> SemanticCache:
+    cache = SemanticCache(pg_dsn=pg_dsn)
+    cache._settings = Settings(
+        redis_url="redis://fake" if with_redis else "",
+        cache_enabled=True,
+        pg_dsn="",
+    )
+    if with_redis:
+        cache._redis = FakeRedis()
+    return cache
+
+
+def _track_embed_calls(cache: SemanticCache) -> list[str]:
+    calls: list[str] = []
+
+    async def fake_embed(text: str) -> list[float]:
+        calls.append(text)
+        return [0.0] * 4
+
+    cache._embed = fake_embed
+    return calls
+
+
+# ── DSN wiring ─────────────────────────────────────────────────────────────────
+
+def test_explicit_pg_dsn_overrides_settings():
+    dsn = "postgresql://user:pw@aurora-host:5432/ai_platform"
+    assert SemanticCache(pg_dsn=dsn)._pg_dsn == dsn
+
+
+def test_default_pg_dsn_falls_back_to_settings():
+    assert SemanticCache()._pg_dsn == get_settings().pg_dsn
+
+
+def test_lookup_skips_semantic_layer_without_dsn():
+    cache = _make_cache(pg_dsn="")
+    embed_calls = _track_embed_calls(cache)
+
+    result = asyncio.run(cache.lookup("some uncached prompt"))
+
+    assert result is None
+    assert embed_calls == []  # pgvector layer never attempted
+
+
+def test_write_skips_semantic_layer_without_dsn():
+    cache = _make_cache(pg_dsn="")
+    embed_calls = _track_embed_calls(cache)
+
+    asyncio.run(
+        cache.write(
+            prompt="a prompt",
+            response="a response",
+            model_used="test/model",
+            input_tokens=3,
+            output_tokens=5,
+        )
+    )
+
+    assert embed_calls == []  # no embedding call without a pg backend
+    assert len(cache._redis.store) == 1  # Redis layer still written
+
+
+def test_write_then_exact_lookup_round_trips_via_redis():
+    cache = _make_cache(pg_dsn="")
+    _track_embed_calls(cache)
+
+    asyncio.run(
+        cache.write(
+            prompt="What is the capital of France?",
+            response="Paris.",
+            model_used="test/model",
+            input_tokens=8,
+            output_tokens=2,
+        )
+    )
+    result = asyncio.run(cache.lookup("what is  the capital of FRANCE?"))
+
+    assert result is not None
+    assert result.source == "exact"
+    assert result.response == "Paris."
+    assert result.model_used == "test/model"

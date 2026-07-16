@@ -201,6 +201,15 @@ def _teardown_app_state() -> None:
     gateway.app.dependency_overrides.clear()
 
 
+def test_lifespan_passes_resolved_dsn_to_cache():
+    dsn = "postgresql://user:pw@aurora-host:5432/ai_platform"
+    with (
+        patch.object(gateway, "_resolve_pg_dsn", return_value=dsn),
+        TestClient(gateway.app),
+    ):
+        assert gateway.app.state.cache._pg_dsn == dsn
+
+
 def test_health_endpoint_returns_provider_statuses():
     router = FakeRouter(provider_name="cheap-model")
     cache = FakeCache()

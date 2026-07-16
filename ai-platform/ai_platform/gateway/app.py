@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -118,10 +117,9 @@ async def lifespan(app: FastAPI):
     """Initialize shared resources at cold start."""
     settings = get_settings()
 
-    # Resolve Aurora DSN — inject into environment before SemanticCache reads settings
+    # Resolve Aurora DSN — passed directly to SemanticCache below; the cached
+    # Settings object cannot pick it up from the environment after construction.
     pg_dsn = _resolve_pg_dsn(settings)
-    if pg_dsn and not settings.pg_dsn:
-        os.environ["PG_DSN"] = pg_dsn
 
     # Resolve API keys — prefer direct env var, fall back to Secrets Manager ARN
     anthropic_key = settings.anthropic_api_key
@@ -174,7 +172,7 @@ async def lifespan(app: FastAPI):
     }
 
     app.state.router = LLMRouter(providers_by_tier)
-    app.state.cache = SemanticCache()
+    app.state.cache = SemanticCache(pg_dsn=pg_dsn)
     app.state.authenticator = Authenticator()
     app.state.rate_limiter = RateLimiter()
 

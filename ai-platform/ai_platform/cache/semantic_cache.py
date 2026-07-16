@@ -43,9 +43,12 @@ def _hash_prompt(prompt: str) -> str:
 
 
 class SemanticCache:
-    def __init__(self) -> None:
+    def __init__(self, pg_dsn: str | None = None) -> None:
         settings = get_settings()
         self._settings = settings
+        # DSN resolved at startup (e.g. from Secrets Manager) must be passed in
+        # explicitly — the cached Settings object never re-reads env vars.
+        self._pg_dsn = settings.pg_dsn if pg_dsn is None else pg_dsn
         self._redis: aioredis.Redis | None = None
         self._pg: asyncpg.Connection | None = None
         self._bedrock = boto3.client("bedrock-runtime", region_name=settings.bedrock_region)
@@ -63,7 +66,7 @@ class SemanticCache:
 
     async def _get_pg(self) -> asyncpg.Connection:
         if self._pg is None or self._pg.is_closed():
-            self._pg = await asyncpg.connect(self._settings.pg_dsn)
+            self._pg = await asyncpg.connect(self._pg_dsn)
         return self._pg
 
     def _embed_sync(self, text: str) -> list[float]:
@@ -105,6 +108,8 @@ class SemanticCache:
             logger.warning("redis_lookup_failed", extra={"error": str(exc)})
 
         # ── Layer 2: pgvector semantic search ─────────────────────────────────
+        if not self._pg_dsn:
+            return None
         try:
             embedding = await self._embed(normalized)
             pg = await self._get_pg()
@@ -160,6 +165,8 @@ class SemanticCache:
         )
 
         # Write to pgvector for semantic recall
+        if not self._pg_dsn:
+            return
         try:
             embedding = await self._embed(normalized)
             pg = await self._get_pg()
