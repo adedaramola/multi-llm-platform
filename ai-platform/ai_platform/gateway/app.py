@@ -88,6 +88,7 @@ async def _safe_cache_write(
     model_used: str,
     input_tokens: int,
     output_tokens: int,
+    model_constraint: str = "",
 ) -> None:
     settings = get_settings()
     timeout_seconds = max(settings.cache_write_timeout_ms, 1) / 1000
@@ -100,6 +101,7 @@ async def _safe_cache_write(
                 model_used=model_used,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                model_constraint=model_constraint,
             ),
             timeout=timeout_seconds,
         )
@@ -239,9 +241,10 @@ async def chat_completion(
 
     cache: SemanticCache = request.app.state.cache
     router: LLMRouter = request.app.state.router
+    model_constraint = body.model_preference or ""
 
     # ── Cache lookup ──────────────────────────────────────────────────────────
-    cached = await cache.lookup(body.prompt_text)
+    cached = await cache.lookup(body.prompt_text, model_constraint=model_constraint)
     if cached:
         latency_ms = int((time.perf_counter() - start_time) * 1000)
         emit_request_metric(
@@ -312,6 +315,7 @@ async def chat_completion(
         model_used=provider_response.model_id,
         input_tokens=provider_response.input_tokens,
         output_tokens=provider_response.output_tokens,
+        model_constraint=model_constraint,
     )
 
     emit_request_metric(
@@ -363,9 +367,10 @@ async def chat_completion_stream(
 
     cache: SemanticCache = request.app.state.cache
     router: LLMRouter = request.app.state.router
+    model_constraint = body.model_preference or ""
 
     # Serve exact/semantic cache hits as a single synthetic SSE event
-    cached = await cache.lookup(body.prompt_text)
+    cached = await cache.lookup(body.prompt_text, model_constraint=model_constraint)
     if cached:
         latency_ms = int((time.perf_counter() - start_time) * 1000)
         emit_request_metric(
@@ -429,6 +434,7 @@ async def chat_completion_stream(
             model_used=model_id,
             input_tokens=0,
             output_tokens=0,
+            model_constraint=model_constraint,
         )
         emit_request_metric(
             request_id=request_id,

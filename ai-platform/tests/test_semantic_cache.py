@@ -83,6 +83,53 @@ def test_write_skips_semantic_layer_without_dsn():
     assert len(cache._redis.store) == 1  # Redis layer still written
 
 
+# ── Model-constraint keying ────────────────────────────────────────────────────
+
+def test_pinned_lookup_never_hits_other_models_entry():
+    cache = _make_cache(pg_dsn="")
+    _track_embed_calls(cache)
+
+    # Response produced under an "opus" pin
+    asyncio.run(
+        cache.write(
+            prompt="Summarize this document",
+            response="opus answer",
+            model_used="claude-opus",
+            input_tokens=5,
+            output_tokens=5,
+            model_constraint="opus",
+        )
+    )
+
+    same_pin = asyncio.run(cache.lookup("Summarize this document", model_constraint="opus"))
+    other_pin = asyncio.run(cache.lookup("Summarize this document", model_constraint="haiku"))
+    unpinned = asyncio.run(cache.lookup("Summarize this document"))
+
+    assert same_pin is not None and same_pin.response == "opus answer"
+    assert other_pin is None
+    assert unpinned is None
+
+
+def test_constraint_is_normalized_for_keying():
+    cache = _make_cache(pg_dsn="")
+    _track_embed_calls(cache)
+
+    asyncio.run(
+        cache.write(
+            prompt="hello",
+            response="hi",
+            model_used="claude-opus",
+            input_tokens=1,
+            output_tokens=1,
+            model_constraint="Opus",
+        )
+    )
+    result = asyncio.run(cache.lookup("hello", model_constraint="  opus "))
+
+    assert result is not None
+    assert result.response == "hi"
+
+
 def test_write_then_exact_lookup_round_trips_via_redis():
     cache = _make_cache(pg_dsn="")
     _track_embed_calls(cache)

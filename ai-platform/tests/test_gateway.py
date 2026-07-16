@@ -82,10 +82,10 @@ class FakeCache:
     def __init__(self, lookup_result=None) -> None:
         self.lookup_result = lookup_result
         self.writes: list[dict] = []
-        self.lookups: list[str] = []
+        self.lookups: list[tuple[str, str]] = []
 
-    async def lookup(self, prompt: str):
-        self.lookups.append(prompt)
+    async def lookup(self, prompt: str, model_constraint: str = ""):
+        self.lookups.append((prompt, model_constraint))
         return self.lookup_result
 
     async def write(
@@ -96,6 +96,7 @@ class FakeCache:
         input_tokens: int,
         output_tokens: int,
         ttl_seconds: int | None = None,
+        model_constraint: str = "",
     ) -> None:
         self.writes.append(
             {
@@ -104,6 +105,7 @@ class FakeCache:
                 "model_used": model_used,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "model_constraint": model_constraint,
             }
         )
 
@@ -300,6 +302,33 @@ def test_chat_cache_miss_routes_and_writes_cache():
     assert router.route_calls == 1
     assert len(cache.writes) == 1
     assert cache.writes[0]["response"] == "from-provider"
+
+
+def test_chat_model_preference_flows_into_cache_key():
+    router = FakeRouter()
+    cache = FakeCache(lookup_result=None)
+    limiter = FakeRateLimiter()
+    registry = FakeRegistry({"cheap-model": True})
+    gateway.app.dependency_overrides[gateway.get_caller_identity] = _auth_override
+
+    body = _request_body("pin me")
+    body["model_preference"] = "opus"
+
+    with (
+        patch.object(gateway, "get_health_registry", return_value=registry),
+        patch.object(gateway, "emit_request_metric", return_value=None),
+        patch.object(gateway, "emit_error_metric", return_value=None),
+        TestClient(gateway.app) as client,
+    ):
+        gateway.app.state.router = router
+        gateway.app.state.cache = cache
+        gateway.app.state.rate_limiter = limiter
+        resp = client.post("/v1/chat", json=body)
+
+    _teardown_app_state()
+    assert resp.status_code == 200
+    assert cache.lookups == [("user: pin me", "opus")]
+    assert cache.writes[0]["model_constraint"] == "opus"
 
 
 def test_chat_returns_503_when_all_providers_fail():

@@ -38,8 +38,18 @@ def _normalize_prompt(prompt: str) -> str:
     return " ".join(prompt.lower().split())
 
 
-def _hash_prompt(prompt: str) -> str:
-    return hashlib.sha256(_normalize_prompt(prompt).encode()).hexdigest()
+def _normalize_constraint(model_constraint: str) -> str:
+    return model_constraint.strip().lower()
+
+
+def _cache_key(prompt: str, model_constraint: str = "") -> str:
+    """
+    Cache key over the normalized prompt AND the caller's model constraint,
+    so a request pinned to one model is never served another model's answer.
+    """
+    normalized = _normalize_prompt(prompt)
+    constraint = _normalize_constraint(model_constraint)
+    return hashlib.sha256(f"{constraint}\x00{normalized}".encode()).hexdigest()
 
 
 class SemanticCache:
@@ -85,12 +95,13 @@ class SemanticCache:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._embed_sync, text)
 
-    async def lookup(self, prompt: str) -> CacheResult | None:
+    async def lookup(self, prompt: str, model_constraint: str = "") -> CacheResult | None:
         if not self._settings.cache_enabled:
             return None
 
         normalized = _normalize_prompt(prompt)
-        prompt_hash = _hash_prompt(normalized)
+        constraint = _normalize_constraint(model_constraint)
+        prompt_hash = _cache_key(prompt, constraint)
 
         # ── Layer 1: Redis exact match ────────────────────────────────────────
         try:
@@ -113,16 +124,20 @@ class SemanticCache:
         try:
             embedding = await self._embed(normalized)
             pg = await self._get_pg()
+            # A model-pinned request may only match entries produced by a model
+            # satisfying that pin (same substring semantics as the router).
             row = await pg.fetchrow(
                 """
                 SELECT response, model_used,
                        1 - (embedding <=> $1::vector) AS similarity
                 FROM semantic_cache
                 WHERE (expires_at IS NULL OR expires_at > NOW())
+                  AND ($2 = '' OR model_used ILIKE '%' || $2 || '%')
                 ORDER BY embedding <=> $1::vector
                 LIMIT 1
                 """,
                 embedding,
+                constraint,
             )
             if row and row["similarity"] >= self._settings.semantic_cache_threshold:
                 logger.info(
@@ -150,13 +165,14 @@ class SemanticCache:
         input_tokens: int,
         output_tokens: int,
         ttl_seconds: int | None = None,
+        model_constraint: str = "",
     ) -> None:
         """Store response in both Redis and pgvector."""
         if not self._settings.cache_enabled:
             return
 
         normalized = _normalize_prompt(prompt)
-        prompt_hash = _hash_prompt(normalized)
+        prompt_hash = _cache_key(prompt, model_constraint)
 
         # Write to Redis first (fast path for future exact hits)
         await self._promote_to_redis(
