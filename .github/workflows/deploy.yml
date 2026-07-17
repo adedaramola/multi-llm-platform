@@ -126,7 +126,7 @@ jobs:
 
       - name: Smoke test
         run: |
-          API_URL="https://ozj6y1pi1g.execute-api.us-east-1.amazonaws.com"
+          API_URL="https://jo1sunwnme.execute-api.us-east-1.amazonaws.com"
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$API_URL/health")
           echo "Health check status: $STATUS"
           [ "$STATUS" = "200" ] || (echo "Smoke test failed" && exit 1)
