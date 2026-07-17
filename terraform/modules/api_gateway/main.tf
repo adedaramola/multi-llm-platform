@@ -13,7 +13,7 @@ resource "aws_apigatewayv2_api" "main" {
 
 resource "aws_apigatewayv2_stage" "main" {
   api_id      = aws_apigatewayv2_api.main.id
-  name        = "$default"   # $default stage avoids prepending stage name to rawPath
+  name        = "$default" # $default stage avoids prepending stage name to rawPath
   auto_deploy = true
 
   access_log_settings {
@@ -52,6 +52,12 @@ resource "aws_apigatewayv2_route" "chat" {
 resource "aws_apigatewayv2_route" "chat_stream" {
   api_id    = aws_apigatewayv2_api.main.id
   route_key = "POST /v1/chat/stream"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+}
+
+resource "aws_apigatewayv2_route" "usage" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "GET /v1/usage"
   target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
 }
 
