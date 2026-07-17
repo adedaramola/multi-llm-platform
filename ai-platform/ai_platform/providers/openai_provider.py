@@ -4,7 +4,7 @@ Works with OpenAI directly or any OpenAI-compatible endpoint (local Ollama, Azur
 """
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any, cast
 
 from openai import AsyncOpenAI
@@ -75,6 +75,7 @@ class OpenAIProvider(BaseProvider):
         messages: list[dict],
         max_tokens: int,
         temperature: float,
+        on_usage: Callable[[int, int], None] | None = None,
     ) -> AsyncIterator[str]:
         stream = await self._client.chat.completions.create(
             model=self.config.model_id,
@@ -82,8 +83,14 @@ class OpenAIProvider(BaseProvider):
             max_tokens=min(max_tokens, self.config.max_tokens_limit),
             temperature=temperature,
             stream=True,
+            stream_options={"include_usage": True},
         )
         async for chunk in stream:
+            # The final chunk carries usage and has an empty choices list
+            if chunk.usage and on_usage:
+                on_usage(chunk.usage.prompt_tokens, chunk.usage.completion_tokens)
+            if not chunk.choices:
+                continue
             delta = chunk.choices[0].delta.content
             if delta:
                 yield delta

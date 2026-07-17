@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     api_keys_table: str = "ai-platform-api-keys"
     rate_limit_table: str = "ai-platform-rate-limits"
     health_table: str = "ai-platform-provider-health"
+    usage_table: str = "ai-platform-usage"
 
     # ── Rate Limits (defaults, overridden per API key) ────────────────────────
     default_rpm: int = 60       # requests per minute

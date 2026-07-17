@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 # Some local environments used for fast unit tests may not include all optional
@@ -71,6 +72,44 @@ class FakeCacheResult:
     model_used: str = "cached-model"
 
 
+class FakeUsageRecorder:
+    def __init__(self, summary: dict | None = None, error: Exception | None = None) -> None:
+        self.records: list[dict] = []
+        self._summary = summary
+        self._error = error
+
+    async def record(
+        self,
+        caller_id: str,
+        *,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        estimated_cost_usd: float = 0.0,
+        cache_hit: bool = False,
+    ) -> None:
+        self.records.append(
+            {
+                "caller_id": caller_id,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "estimated_cost_usd": estimated_cost_usd,
+                "cache_hit": cache_hit,
+            }
+        )
+
+    async def month_summary(self, caller_id: str) -> dict:
+        if self._error:
+            raise self._error
+        return self._summary or {
+            "month": "2026-07",
+            "request_count": 0,
+            "cache_hits": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "estimated_cost_usd": 0.0,
+        }
+
+
 class FakeRateLimiter:
     def __init__(self) -> None:
         self.calls = 0
@@ -122,6 +161,7 @@ class FakeRouter:
         route_error: Exception | None = None,
         stream_error: Exception | None = None,
         stream_error_after_chunks: Exception | None = None,
+        stream_usage: tuple[int, int] | None = None,
     ) -> None:
         self.provider = SimpleNamespace(
             name=provider_name,
@@ -145,6 +185,7 @@ class FakeRouter:
         self._route_error = route_error
         self._stream_error = stream_error
         self._stream_error_after_chunks = stream_error_after_chunks
+        self._stream_usage = stream_usage
         self.route_calls = 0
         self.stream_calls = 0
 
@@ -156,7 +197,7 @@ class FakeRouter:
             raise self._route_error
         return self._route_response
 
-    async def route_stream(self, request: InferenceRequest, on_provider_selected=None):
+    async def route_stream(self, request: InferenceRequest, on_provider_selected=None, on_usage=None):
         self.stream_calls += 1
         if on_provider_selected:
             on_provider_selected(self.provider.name, self.provider.config.tier)
@@ -166,6 +207,8 @@ class FakeRouter:
             yield chunk
         if self._stream_error_after_chunks:
             raise self._stream_error_after_chunks
+        if self._stream_usage and on_usage:
+            on_usage(*self._stream_usage)
 
 
 class FakeRegistry:
@@ -201,6 +244,7 @@ def _setup_app_state(router: FakeRouter, cache: FakeCache, limiter: FakeRateLimi
     gateway.app.state.router = router
     gateway.app.state.cache = cache
     gateway.app.state.rate_limiter = limiter
+    gateway.app.state.usage_recorder = FakeUsageRecorder()
     gateway.app.dependency_overrides[gateway.get_caller_identity] = _auth_override
 
 
@@ -233,6 +277,7 @@ def test_health_endpoint_returns_provider_statuses():
         gateway.app.state.router = router
         gateway.app.state.cache = cache
         gateway.app.state.rate_limiter = limiter
+        gateway.app.state.usage_recorder = FakeUsageRecorder()
         resp = client.get("/health")
 
     _teardown_app_state()
@@ -259,6 +304,7 @@ def test_chat_cache_hit_returns_cached_response():
         gateway.app.state.router = router
         gateway.app.state.cache = cache
         gateway.app.state.rate_limiter = limiter
+        gateway.app.state.usage_recorder = FakeUsageRecorder()
         resp = client.post("/v1/chat", json=_request_body())
 
     _teardown_app_state()
@@ -295,6 +341,7 @@ def test_chat_cache_miss_routes_and_writes_cache():
         gateway.app.state.router = router
         gateway.app.state.cache = cache
         gateway.app.state.rate_limiter = limiter
+        gateway.app.state.usage_recorder = FakeUsageRecorder()
         resp = client.post("/v1/chat", json=_request_body("route this"))
 
     _teardown_app_state()
@@ -328,6 +375,7 @@ def test_chat_model_preference_flows_into_cache_key():
         gateway.app.state.router = router
         gateway.app.state.cache = cache
         gateway.app.state.rate_limiter = limiter
+        gateway.app.state.usage_recorder = FakeUsageRecorder()
         resp = client.post("/v1/chat", json=body)
 
     _teardown_app_state()
@@ -352,6 +400,7 @@ def test_chat_returns_503_when_all_providers_fail():
         gateway.app.state.router = router
         gateway.app.state.cache = cache
         gateway.app.state.rate_limiter = limiter
+        gateway.app.state.usage_recorder = FakeUsageRecorder()
         resp = client.post("/v1/chat", json=_request_body("fail please"))
 
     _teardown_app_state()
@@ -377,6 +426,7 @@ def test_stream_cache_hit_returns_sse_done():
         gateway.app.state.router = router
         gateway.app.state.cache = cache
         gateway.app.state.rate_limiter = limiter
+        gateway.app.state.usage_recorder = FakeUsageRecorder()
         resp = client.post("/v1/chat/stream", json=_request_body("stream"))
 
     _teardown_app_state()
@@ -402,6 +452,7 @@ def test_stream_cache_miss_streams_chunks_and_writes_cache():
         gateway.app.state.router = router
         gateway.app.state.cache = cache
         gateway.app.state.rate_limiter = limiter
+        gateway.app.state.usage_recorder = FakeUsageRecorder()
         resp = client.post("/v1/chat/stream", json=_request_body("stream miss"))
 
     _teardown_app_state()
@@ -413,6 +464,166 @@ def test_stream_cache_miss_streams_chunks_and_writes_cache():
     assert len(cache.writes) == 1
     assert cache.writes[0]["response"] == "helloworld"
     assert cache.writes[0]["model_used"] == "test/cheap-model"
+
+
+def test_stream_records_real_tokens_and_cost():
+    router = FakeRouter(
+        stream_chunks=["hello", "world"],
+        model_id="test/cheap-model",
+        stream_usage=(1000, 500),  # provider reports usage at stream end
+    )
+    cache = FakeCache(lookup_result=None)
+    limiter = FakeRateLimiter()
+    registry = FakeRegistry({"cheap-model": True})
+    gateway.app.dependency_overrides[gateway.get_caller_identity] = _auth_override
+
+    with (
+        patch.object(gateway, "get_health_registry", return_value=registry),
+        patch.object(gateway, "emit_request_metric", return_value=None) as metric,
+        patch.object(gateway, "emit_error_metric", return_value=None),
+        TestClient(gateway.app) as client,
+    ):
+        gateway.app.state.router = router
+        gateway.app.state.cache = cache
+        gateway.app.state.rate_limiter = limiter
+        gateway.app.state.usage_recorder = FakeUsageRecorder()
+        resp = client.post("/v1/chat/stream", json=_request_body("count my tokens"))
+
+    _teardown_app_state()
+    assert resp.status_code == 200
+    kwargs = metric.call_args.kwargs
+    assert kwargs["input_tokens"] == 1000
+    assert kwargs["output_tokens"] == 500
+    # cost = 1000 * 0.1/1M + 500 * 0.2/1M (FakeRouter provider config)
+    assert kwargs["estimated_cost_usd"] == pytest.approx(0.0002)
+    assert cache.writes[0]["input_tokens"] == 1000
+    assert cache.writes[0]["output_tokens"] == 500
+
+
+def test_chat_records_usage_per_caller():
+    router = FakeRouter(
+        route_response=ProviderResponse(
+            content="from-provider",
+            input_tokens=800,
+            output_tokens=400,
+            model_id="test/cheap-model",
+            provider_name="cheap-model",
+        )
+    )
+    cache = FakeCache(lookup_result=None)
+    limiter = FakeRateLimiter()
+    registry = FakeRegistry({"cheap-model": True})
+    recorder = FakeUsageRecorder()
+    gateway.app.dependency_overrides[gateway.get_caller_identity] = _auth_override
+
+    with (
+        patch.object(gateway, "get_health_registry", return_value=registry),
+        patch.object(gateway, "emit_request_metric", return_value=None),
+        patch.object(gateway, "emit_error_metric", return_value=None),
+        TestClient(gateway.app) as client,
+    ):
+        gateway.app.state.router = router
+        gateway.app.state.cache = cache
+        gateway.app.state.rate_limiter = limiter
+        gateway.app.state.usage_recorder = recorder
+        resp = client.post("/v1/chat", json=_request_body("bill me"))
+
+    _teardown_app_state()
+    assert resp.status_code == 200
+    assert len(recorder.records) == 1
+    record = recorder.records[0]
+    assert record["caller_id"] == "test-caller"
+    assert record["input_tokens"] == 800
+    assert record["output_tokens"] == 400
+    assert record["estimated_cost_usd"] == pytest.approx(800 * 0.1e-6 + 400 * 0.2e-6)
+    assert record["cache_hit"] is False
+
+
+def test_chat_cache_hit_records_usage_as_cache_hit():
+    router = FakeRouter()
+    cache = FakeCache(lookup_result=FakeCacheResult(response="from-cache", source="exact"))
+    limiter = FakeRateLimiter()
+    registry = FakeRegistry({"cheap-model": True})
+    recorder = FakeUsageRecorder()
+    gateway.app.dependency_overrides[gateway.get_caller_identity] = _auth_override
+
+    with (
+        patch.object(gateway, "get_health_registry", return_value=registry),
+        patch.object(gateway, "emit_request_metric", return_value=None),
+        patch.object(gateway, "emit_error_metric", return_value=None),
+        TestClient(gateway.app) as client,
+    ):
+        gateway.app.state.router = router
+        gateway.app.state.cache = cache
+        gateway.app.state.rate_limiter = limiter
+        gateway.app.state.usage_recorder = recorder
+        resp = client.post("/v1/chat", json=_request_body())
+
+    _teardown_app_state()
+    assert resp.status_code == 200
+    assert len(recorder.records) == 1
+    assert recorder.records[0]["cache_hit"] is True
+    assert recorder.records[0]["estimated_cost_usd"] == 0.0
+
+
+def test_usage_endpoint_returns_month_summary():
+    router = FakeRouter()
+    cache = FakeCache()
+    limiter = FakeRateLimiter()
+    registry = FakeRegistry({"cheap-model": True})
+    recorder = FakeUsageRecorder(
+        summary={
+            "month": "2026-07",
+            "request_count": 42,
+            "cache_hits": 10,
+            "input_tokens": 5000,
+            "output_tokens": 2500,
+            "estimated_cost_usd": 0.0375,
+        }
+    )
+    gateway.app.dependency_overrides[gateway.get_caller_identity] = _auth_override
+
+    with (
+        patch.object(gateway, "get_health_registry", return_value=registry),
+        TestClient(gateway.app) as client,
+    ):
+        gateway.app.state.router = router
+        gateway.app.state.cache = cache
+        gateway.app.state.rate_limiter = limiter
+        gateway.app.state.usage_recorder = recorder
+        resp = client.get("/v1/usage")
+
+    _teardown_app_state()
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["caller_id"] == "test-caller"
+    assert payload["month"] == "2026-07"
+    assert payload["request_count"] == 42
+    assert payload["cache_hits"] == 10
+    assert payload["estimated_cost_usd"] == pytest.approx(0.0375)
+
+
+def test_usage_endpoint_returns_503_when_store_unavailable():
+    router = FakeRouter()
+    cache = FakeCache()
+    limiter = FakeRateLimiter()
+    registry = FakeRegistry({"cheap-model": True})
+    recorder = FakeUsageRecorder(error=RuntimeError("dynamo down"))
+    gateway.app.dependency_overrides[gateway.get_caller_identity] = _auth_override
+
+    with (
+        patch.object(gateway, "get_health_registry", return_value=registry),
+        TestClient(gateway.app) as client,
+    ):
+        gateway.app.state.router = router
+        gateway.app.state.cache = cache
+        gateway.app.state.rate_limiter = limiter
+        gateway.app.state.usage_recorder = recorder
+        resp = client.get("/v1/usage")
+
+    _teardown_app_state()
+    assert resp.status_code == 503
+    assert resp.json()["code"] == "usage_unavailable"
 
 
 def test_stream_interrupted_mid_stream_emits_error_and_skips_cache():
@@ -434,6 +645,7 @@ def test_stream_interrupted_mid_stream_emits_error_and_skips_cache():
         gateway.app.state.router = router
         gateway.app.state.cache = cache
         gateway.app.state.rate_limiter = limiter
+        gateway.app.state.usage_recorder = FakeUsageRecorder()
         resp = client.post("/v1/chat/stream", json=_request_body("interrupt me"))
 
     _teardown_app_state()

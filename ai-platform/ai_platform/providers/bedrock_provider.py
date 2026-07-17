@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
 import boto3
 
@@ -126,8 +126,11 @@ class BedrockProvider(BaseProvider):
         messages: list[dict],
         max_tokens: int,
         temperature: float,
+        on_usage: Callable[[int, int], None] | None = None,
     ) -> AsyncIterator[str]:
         response = await self.complete(messages, max_tokens, temperature)
+        if on_usage:
+            on_usage(response.input_tokens, response.output_tokens)
         yield response.content
 
     async def health_check(self) -> bool:

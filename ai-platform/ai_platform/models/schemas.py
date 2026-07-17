@@ -76,6 +76,17 @@ class InferenceResponse(BaseModel):
     timestamp: float = Field(default_factory=time.time)
 
 
+class UsageSummary(BaseModel):
+    """Per-caller aggregate for the current UTC month."""
+    caller_id: str
+    month: str                      # "YYYY-MM"
+    request_count: int = 0
+    cache_hits: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
+
 class ErrorResponse(BaseModel):
     request_id: str
     error: str

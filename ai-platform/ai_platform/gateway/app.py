@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from mangum import Mangum
 
+from ..accounting.usage_recorder import UsageRecorder
 from ..auth.authenticator import Authenticator, CallerIdentity, get_caller_identity
 from ..auth.rate_limiter import RateLimiter
 from ..cache.semantic_cache import SemanticCache
@@ -27,6 +28,7 @@ from ..models.schemas import (
     InferenceRequest,
     InferenceResponse,
     UsageStats,
+    UsageSummary,
 )
 from ..providers.anthropic_provider import AnthropicProvider, haiku_config, opus_config, sonnet_config
 from ..providers.base import BaseProvider
@@ -177,6 +179,7 @@ async def lifespan(app: FastAPI):
     app.state.cache = SemanticCache(pg_dsn=pg_dsn)
     app.state.authenticator = Authenticator()
     app.state.rate_limiter = RateLimiter()
+    app.state.usage_recorder = UsageRecorder()
 
     # Warm provider health registry
     get_health_registry().refresh()
@@ -262,6 +265,7 @@ async def chat_completion(
             status_code=200,
             estimated_cost_usd=0.0,
         )
+        await request.app.state.usage_recorder.record(caller.caller_id, cache_hit=True)
         return InferenceResponse(
             request_id=request_id,
             model_used=cached.model_used or "cached",
@@ -334,6 +338,13 @@ async def chat_completion(
         estimated_cost_usd=cost,
     )
 
+    await request.app.state.usage_recorder.record(
+        caller.caller_id,
+        input_tokens=provider_response.input_tokens,
+        output_tokens=provider_response.output_tokens,
+        estimated_cost_usd=cost,
+    )
+
     return InferenceResponse(
         request_id=request_id,
         model_used=provider_response.model_id,
@@ -389,6 +400,8 @@ async def chat_completion_stream(
             estimated_cost_usd=0.0,
         )
 
+        await request.app.state.usage_recorder.record(caller.caller_id, cache_hit=True)
+
         async def _cached_sse():
             yield f"data: {cached.response}\n\n"
             yield "data: [DONE]\n\n"
@@ -401,15 +414,24 @@ async def chat_completion_stream(
 
     selected_provider_name = ["unknown"]
     selected_tier = ["unknown"]
+    stream_usage = {"input_tokens": 0, "output_tokens": 0}
 
     def on_provider_selected(name: str, tier: str) -> None:
         selected_provider_name[0] = name
         selected_tier[0] = tier
 
+    def on_usage(input_tokens: int, output_tokens: int) -> None:
+        stream_usage["input_tokens"] = input_tokens
+        stream_usage["output_tokens"] = output_tokens
+
     async def _sse_generator():
         streamed_chunks: list[str] = []
         try:
-            async for chunk in router.route_stream(body, on_provider_selected=on_provider_selected):
+            async for chunk in router.route_stream(
+                body,
+                on_provider_selected=on_provider_selected,
+                on_usage=on_usage,
+            ):
                 streamed_chunks.append(chunk)
                 # Escape newlines inside the chunk so SSE framing is not broken
                 escaped = chunk.replace("\n", "\\n")
@@ -440,13 +462,21 @@ async def chat_completion_stream(
         latency_ms = int((time.perf_counter() - start_time) * 1000)
         provider_obj = _find_provider(router, selected_provider_name[0])
         model_id = provider_obj.config.model_id if provider_obj else selected_provider_name[0]
+        input_tokens = stream_usage["input_tokens"]
+        output_tokens = stream_usage["output_tokens"]
+        cost = 0.0
+        if provider_obj:
+            cost = (
+                input_tokens * provider_obj.config.cost_per_input_token
+                + output_tokens * provider_obj.config.cost_per_output_token
+            )
         await _safe_cache_write(
             cache,
             prompt=body.prompt_text,
             response="".join(streamed_chunks),
             model_used=model_id,
-            input_tokens=0,
-            output_tokens=0,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
             model_constraint=model_constraint,
         )
         emit_request_metric(
@@ -455,13 +485,19 @@ async def chat_completion_stream(
             provider=selected_provider_name[0],
             model=model_id,
             tier=selected_tier[0],
-            input_tokens=0,  # streaming — token counts not available mid-stream
-            output_tokens=0,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
             latency_ms=latency_ms,
             cache_hit=False,
             cache_source="none",
             status_code=200,
-            estimated_cost_usd=0.0,
+            estimated_cost_usd=cost,
+        )
+        await request.app.state.usage_recorder.record(
+            caller.caller_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            estimated_cost_usd=cost,
         )
         yield "data: [DONE]\n\n"
 
@@ -470,6 +506,31 @@ async def chat_completion_stream(
         media_type="text/event-stream",
         headers={"X-Request-ID": request_id, "Cache-Control": "no-cache"},
     )
+
+
+@app.get("/v1/usage", response_model=UsageSummary)
+async def usage_summary(
+    request: Request,
+    caller: Annotated[CallerIdentity, Depends(get_caller_identity)],
+) -> UsageSummary | JSONResponse:
+    """Current-month usage and estimated spend for the calling API key."""
+    recorder: UsageRecorder = request.app.state.usage_recorder
+    try:
+        summary = await recorder.month_summary(caller.caller_id)
+    except Exception as exc:
+        logger.error(
+            "usage_query_failed",
+            extra={"error": str(exc), "caller_id": caller.caller_id},
+        )
+        return JSONResponse(
+            status_code=503,
+            content=ErrorResponse(
+                request_id=request.state.request_id,
+                error="Usage data temporarily unavailable.",
+                code="usage_unavailable",
+            ).model_dump(),
+        )
+    return UsageSummary(caller_id=caller.caller_id, **summary)
 
 
 # Lambda handler

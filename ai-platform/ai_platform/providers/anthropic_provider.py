@@ -4,7 +4,7 @@ Supports Claude Haiku (low), Sonnet (mid), and Opus (high) tiers.
 """
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
 import anthropic
 
@@ -92,6 +92,7 @@ class AnthropicProvider(BaseProvider):
         messages: list[dict],
         max_tokens: int,
         temperature: float,
+        on_usage: Callable[[int, int], None] | None = None,
     ) -> AsyncIterator[str]:
         system_prompt = ""
         chat_messages = []
@@ -113,6 +114,13 @@ class AnthropicProvider(BaseProvider):
         async with self._client.messages.stream(**kwargs) as stream:
             async for text in stream.text_stream:
                 yield text
+            if on_usage:
+                try:
+                    final = await stream.get_final_message()
+                    on_usage(final.usage.input_tokens, final.usage.output_tokens)
+                except Exception:
+                    # Usage is best-effort — never fail a delivered stream over it
+                    pass
 
     async def health_check(self) -> bool:
         try:

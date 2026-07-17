@@ -185,6 +185,7 @@ class LLMRouter:
         self,
         request: InferenceRequest,
         on_provider_selected: Callable[[str, str], None] | None = None,
+        on_usage: Callable[[int, int], None] | None = None,
     ) -> AsyncIterator[str]:
         """
         Streaming variant of route().
@@ -210,6 +211,7 @@ class LLMRouter:
                             messages=messages,
                             max_tokens=request.max_tokens,
                             temperature=request.temperature,
+                            on_usage=on_usage,
                         ),
                         timeout,
                     ):
@@ -252,6 +254,7 @@ class LLMRouter:
                             messages=messages,
                             max_tokens=request.max_tokens,
                             temperature=request.temperature,
+                            on_usage=on_usage,
                         ),
                         timeout,
                     ):
