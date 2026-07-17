@@ -10,7 +10,7 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -28,8 +28,8 @@ from ..models.schemas import (
     InferenceResponse,
     UsageStats,
 )
-from ..providers.base import BaseProvider
 from ..providers.anthropic_provider import AnthropicProvider, haiku_config, opus_config, sonnet_config
+from ..providers.base import BaseProvider
 from ..providers.bedrock_provider import BedrockProvider, bedrock_haiku_config, nova_micro_config
 from ..providers.openai_provider import OpenAIProvider, gpt4o_config, gpt4o_mini_config
 from ..router.health import get_health_registry
@@ -105,7 +105,7 @@ async def _safe_cache_write(
             ),
             timeout=timeout_seconds,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(
             "cache_write_timeout",
             extra={"model_used": model_used, "timeout_ms": settings.cache_write_timeout_ms},
@@ -213,6 +213,7 @@ async def health_check(request: Request) -> HealthResponse:
 
     healthy_count = sum(provider_statuses.values())
     total_count = len(provider_statuses)
+    status: Literal["ok", "degraded", "unhealthy"]
     if healthy_count == 0:
         status = "unhealthy"
     elif healthy_count < total_count:

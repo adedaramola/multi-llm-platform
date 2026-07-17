@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable
 
 from ..models.schemas import InferenceRequest
 from ..providers.base import BaseProvider, ProviderResponse
@@ -54,7 +54,8 @@ class LLMRouter:
         pref = model_preference.lower()
         for providers in self._tiers.values():
             for p in providers:
-                if (pref in p.name.lower() or pref in p.config.model_id.lower()) and registry.is_healthy(p.name):
+                matches = pref in p.name.lower() or pref in p.config.model_id.lower()
+                if matches and registry.is_healthy(p.name):
                     return p
         return None
 
@@ -73,7 +74,7 @@ class LLMRouter:
         while True:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
-                raise asyncio.TimeoutError("provider stream timed out")
+                raise TimeoutError("provider stream timed out")
 
             try:
                 chunk = await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
@@ -129,10 +130,10 @@ class LLMRouter:
                     )
                     registry.mark_success(preferred.name)
                     return response
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning("preferred_provider_timeout", extra={"provider": preferred.name})
                     registry.mark_failure(preferred.name)
-                    last_error = asyncio.TimeoutError(f"{preferred.name} timed out")
+                    last_error = TimeoutError(f"{preferred.name} timed out")
                 except Exception as exc:
                     logger.warning(
                         "preferred_provider_error",
@@ -164,10 +165,10 @@ class LLMRouter:
                     )
                     registry.mark_success(provider.name)
                     return response
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning("provider_timeout", extra={"provider": provider.name})
                     registry.mark_failure(provider.name)
-                    last_error = asyncio.TimeoutError(f"{provider.name} timed out")
+                    last_error = TimeoutError(f"{provider.name} timed out")
                 except Exception as exc:
                     logger.warning(
                         "provider_error",
@@ -216,7 +217,7 @@ class LLMRouter:
                         yield chunk
                     registry.mark_success(preferred.name)
                     return
-                except asyncio.TimeoutError:
+                except TimeoutError as exc:
                     logger.warning(
                         "preferred_provider_stream_timeout",
                         extra={"provider": preferred.name, "mid_stream": yielded_any},
@@ -225,7 +226,7 @@ class LLMRouter:
                     if yielded_any:
                         raise StreamInterruptedError(
                             f"{preferred.name} timed out mid-stream"
-                        )
+                        ) from exc
                 except Exception as exc:
                     logger.warning(
                         "preferred_provider_stream_error",
@@ -258,7 +259,7 @@ class LLMRouter:
                         yield chunk
                     registry.mark_success(provider.name)
                     return
-                except asyncio.TimeoutError:
+                except TimeoutError as exc:
                     logger.warning(
                         "provider_stream_timeout",
                         extra={"provider": provider.name, "mid_stream": yielded_any},
@@ -267,7 +268,7 @@ class LLMRouter:
                     if yielded_any:
                         raise StreamInterruptedError(
                             f"{provider.name} timed out mid-stream"
-                        )
+                        ) from exc
                 except Exception as exc:
                     logger.warning(
                         "provider_stream_error",

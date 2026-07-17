@@ -38,3 +38,8 @@ ai-platform/dist/
 
 # Claude
 claude.md
+
+# Coverage
+.coverage
+coverage.xml
+htmlcov/

@@ -9,7 +9,6 @@ import re
 from ..config.settings import get_settings
 from ..models.schemas import BudgetHint, InferenceRequest
 
-
 CODE_PATTERN = re.compile(
     r"```|def |class |import |function |SELECT |INSERT |UPDATE |FROM |WHERE |{.*}",
     re.IGNORECASE,

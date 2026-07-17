@@ -4,19 +4,20 @@ All external input enters through these models — no raw dicts passed internall
 """
 from __future__ import annotations
 
-from enum import Enum
-from typing import Any, Literal
-from pydantic import BaseModel, Field, field_validator
 import time
+from enum import StrEnum
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator
 
 
-class BudgetHint(str, Enum):
+class BudgetHint(StrEnum):
     LOW = "low"
     STANDARD = "standard"
     HIGH = "high"
 
 
-class Role(str, Enum):
+class Role(StrEnum):
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"

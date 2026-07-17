@@ -11,6 +11,7 @@ import time
 
 from .config.settings import get_settings
 from .providers.anthropic_provider import AnthropicProvider, haiku_config
+from .providers.base import BaseProvider
 from .providers.bedrock_provider import BedrockProvider, nova_micro_config
 from .providers.openai_provider import OpenAIProvider, gpt4o_mini_config
 from .router.health import ProviderHealthRegistry
@@ -33,7 +34,7 @@ async def _check_and_record(
     start = time.perf_counter()
     try:
         healthy = await asyncio.wait_for(provider.health_check(), timeout=20.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         healthy = False
     latency_ms = int((time.perf_counter() - start) * 1000)
 
@@ -83,7 +84,7 @@ async def _run_checks() -> list[dict]:
             logger.error("openai_secret_fetch_failed", extra={"error": str(exc)})
 
     # One representative per provider family — cheapest model sufficient for liveness check
-    providers = [BedrockProvider(nova_micro_config())]
+    providers: list[BaseProvider] = [BedrockProvider(nova_micro_config())]
     if anthropic_key:
         providers.append(AnthropicProvider(haiku_config(), anthropic_key))
     if openai_key:
@@ -95,9 +96,9 @@ async def _run_checks() -> list[dict]:
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Flatten any unexpected exceptions into failed results
-    clean = []
+    clean: list[dict] = []
     for r in results:
-        if isinstance(r, Exception):
+        if isinstance(r, BaseException):
             logger.error("check_exception", extra={"error": str(r)})
         else:
             clean.append(r)

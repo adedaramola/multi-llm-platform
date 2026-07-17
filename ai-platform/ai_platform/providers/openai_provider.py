@@ -4,7 +4,8 @@ Works with OpenAI directly or any OpenAI-compatible endpoint (local Ollama, Azur
 """
 from __future__ import annotations
 
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any, cast
 
 from openai import AsyncOpenAI
 
@@ -53,7 +54,7 @@ class OpenAIProvider(BaseProvider):
     ) -> ProviderResponse:
         response = await self._client.chat.completions.create(
             model=self.config.model_id,
-            messages=messages,
+            messages=cast("list[Any]", messages),
             max_tokens=min(max_tokens, self.config.max_tokens_limit),
             temperature=temperature,
         )
@@ -62,8 +63,8 @@ class OpenAIProvider(BaseProvider):
 
         return ProviderResponse(
             content=choice.message.content or "",
-            input_tokens=usage.prompt_tokens,
-            output_tokens=usage.completion_tokens,
+            input_tokens=usage.prompt_tokens if usage else 0,
+            output_tokens=usage.completion_tokens if usage else 0,
             model_id=self.config.model_id,
             provider_name=self.config.name,
             raw_metadata={"finish_reason": choice.finish_reason},
@@ -77,7 +78,7 @@ class OpenAIProvider(BaseProvider):
     ) -> AsyncIterator[str]:
         stream = await self._client.chat.completions.create(
             model=self.config.model_id,
-            messages=messages,
+            messages=cast("list[Any]", messages),
             max_tokens=min(max_tokens, self.config.max_tokens_limit),
             temperature=temperature,
             stream=True,

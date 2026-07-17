@@ -5,7 +5,6 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from ai_platform.models.schemas import BudgetHint, InferenceRequest, RequestMetadata
 from ai_platform.providers.base import ProviderConfig, ProviderResponse
 from ai_platform.router.router import LLMRouter, StreamInterruptedError

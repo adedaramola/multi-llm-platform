@@ -3,7 +3,9 @@ Centralized configuration via environment variables.
 Loaded once at Lambda cold start; never queried at runtime per-request.
 """
 from __future__ import annotations
+
 from functools import lru_cache
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 

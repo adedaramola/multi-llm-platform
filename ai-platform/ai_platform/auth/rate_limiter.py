@@ -10,7 +10,6 @@ import logging
 import time
 
 import boto3
-from botocore.exceptions import ClientError
 from fastapi import HTTPException
 
 from ..auth.authenticator import CallerIdentity

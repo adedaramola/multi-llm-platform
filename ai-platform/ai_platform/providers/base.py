@@ -5,8 +5,8 @@ All LLM providers implement this contract — the router never touches provider 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import AsyncIterator
 
 
 @dataclass
@@ -69,13 +69,13 @@ class BaseProvider(ABC):
         ...
 
     @abstractmethod
-    async def stream(
+    def stream(
         self,
         messages: list[dict],
         max_tokens: int,
         temperature: float,
     ) -> AsyncIterator[str]:
-        """Stream tokens as they arrive."""
+        """Stream tokens as they arrive. Implementations are async generators."""
         ...
 
     @abstractmethod

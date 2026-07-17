@@ -1,0 +1,58 @@
+[project]
+name = "ai-platform"
+version = "1.0.0"
+description = "Multi-LLM gateway — cost-aware routing, semantic caching, DynamoDB auth"
+requires-python = ">=3.12"
+
+# ── Ruff ──────────────────────────────────────────────────────────────────────
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+src = ["ai_platform", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests install import-time shims before importing the app modules
+"tests/*" = ["E402"]
+
+# ── Mypy ──────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.12"
+files = ["ai_platform"]
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = [
+    "boto3.*",
+    "botocore.*",
+    "mangum.*",
+    "asyncpg.*",
+]
+ignore_missing_imports = true
+
+# ── Pytest / coverage ─────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
+# Ratchet: raise as provider/auth/rate-limiter tests are added (60% = July 2026 baseline)
+addopts = "--cov=ai_platform --cov-report=term-missing --cov-fail-under=60"
+
+[tool.coverage.run]
+branch = true
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+]

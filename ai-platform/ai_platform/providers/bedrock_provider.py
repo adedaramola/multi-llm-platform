@@ -6,12 +6,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import boto3
 
-from .base import BaseProvider, ProviderConfig, ProviderResponse
 from ..config.settings import get_settings
+from .base import BaseProvider, ProviderConfig, ProviderResponse
 
 
 def nova_micro_config() -> ProviderConfig:

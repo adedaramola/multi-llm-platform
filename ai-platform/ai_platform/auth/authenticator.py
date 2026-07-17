@@ -64,7 +64,7 @@ class Authenticator:
             item = response.get("Item")
         except ClientError as exc:
             logger.error("dynamo_auth_error", extra={"error": str(exc)})
-            raise HTTPException(status_code=503, detail="Auth service unavailable")
+            raise HTTPException(status_code=503, detail="Auth service unavailable") from exc
 
         if not item:
             raise HTTPException(status_code=401, detail="Invalid API key")

@@ -4,7 +4,7 @@ Supports Claude Haiku (low), Sonnet (mid), and Opus (high) tiers.
 """
 from __future__ import annotations
 
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import anthropic
 

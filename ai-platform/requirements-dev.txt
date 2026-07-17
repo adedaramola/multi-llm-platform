@@ -1,0 +1,8 @@
+# Development & CI tooling — production deps live in requirements.txt
+-r requirements.txt
+
+pytest==9.0.3
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+ruff==0.15.22
+mypy==2.3.0
