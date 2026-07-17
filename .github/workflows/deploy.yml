@@ -31,12 +31,22 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: ai-platform/requirements.txt
+          cache-dependency-path: ai-platform/requirements-dev.txt
 
       - name: Install dependencies
-        run: pip install -r ai-platform/requirements.txt pytest pytest-asyncio
+        run: pip install -r ai-platform/requirements-dev.txt
 
-      - name: Run tests
+      - name: Lint (ruff)
+        run: |
+          cd ai-platform
+          ruff check ai_platform tests
+
+      - name: Type check (mypy)
+        run: |
+          cd ai-platform
+          mypy
+
+      - name: Run tests (coverage gate in pyproject.toml)
         run: |
           cd ai-platform
           python -m pytest tests/ -v --tb=short
