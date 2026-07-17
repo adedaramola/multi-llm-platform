@@ -36,16 +36,19 @@ resource "aws_iam_role_policy" "lambda" {
         Resource = "*"
       },
       {
-        # DynamoDB — auth tables + health registry
+        # DynamoDB — auth tables + health registry + usage accounting
+        # Query is needed for per-caller month aggregation on the usage table
         Effect = "Allow"
         Action = [
           "dynamodb:GetItem", "dynamodb:PutItem",
-          "dynamodb:UpdateItem", "dynamodb:Scan"
+          "dynamodb:UpdateItem", "dynamodb:Scan",
+          "dynamodb:Query"
         ]
         Resource = [
           "arn:aws:dynamodb:${var.aws_region}:*:table/${var.api_keys_table_name}",
           "arn:aws:dynamodb:${var.aws_region}:*:table/${var.rate_limit_table_name}",
           "arn:aws:dynamodb:${var.aws_region}:*:table/${var.health_table_name}",
+          "arn:aws:dynamodb:${var.aws_region}:*:table/${var.usage_table_name}",
         ]
       },
       {
@@ -100,6 +103,7 @@ resource "aws_lambda_function" "gateway" {
       API_KEYS_TABLE       = var.api_keys_table_name
       RATE_LIMIT_TABLE     = var.rate_limit_table_name
       HEALTH_TABLE         = var.health_table_name
+      USAGE_TABLE          = var.usage_table_name
       ANTHROPIC_SECRET_ARN = var.anthropic_secret_arn
       OPENAI_SECRET_ARN    = var.openai_secret_arn
       PG_SECRET_ARN        = var.pg_secret_arn
@@ -138,9 +142,9 @@ resource "aws_lambda_alias" "live" {
 }
 
 resource "aws_lambda_provisioned_concurrency_config" "gateway" {
-  function_name                      = aws_lambda_function.gateway.function_name
-  qualifier                          = aws_lambda_alias.live.name
-  provisioned_concurrent_executions  = 2
+  function_name                     = aws_lambda_function.gateway.function_name
+  qualifier                         = aws_lambda_alias.live.name
+  provisioned_concurrent_executions = 2
 }
 
 # ── Lambda Function URL (alternative to API GW for lower latency) ─────────────

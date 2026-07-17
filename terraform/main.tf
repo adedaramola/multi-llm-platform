@@ -71,6 +71,7 @@ module "lambda_router" {
   api_keys_table_name   = module.auth.api_keys_table_name
   rate_limit_table_name = module.auth.rate_limit_table_name
   health_table_name     = module.auth.health_table_name
+  usage_table_name      = module.auth.usage_table_name
   anthropic_secret_arn  = module.auth.anthropic_secret_arn
   openai_secret_arn     = module.auth.openai_secret_arn
 

@@ -30,6 +30,27 @@ resource "aws_dynamodb_table" "rate_limits" {
   }
 }
 
+# ── DynamoDB — Per-caller usage accounting ───────────────────────────────────
+resource "aws_dynamodb_table" "usage" {
+  name         = "ai-platform-usage-${var.environment}"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "caller_id"
+  range_key    = "usage_date"
+
+  attribute {
+    name = "caller_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "usage_date"
+    type = "S"
+  }
+
+  point_in_time_recovery { enabled = true }
+  server_side_encryption { enabled = true }
+}
+
 # ── DynamoDB — Provider health registry ──────────────────────────────────────
 resource "aws_dynamodb_table" "health" {
   name         = "ai-platform-provider-health-${var.environment}"
