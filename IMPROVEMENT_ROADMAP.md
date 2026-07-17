@@ -34,10 +34,10 @@ Success criteria:
 - Deployment configuration supports `dev`, `staging`, and `prod` without hardcoded names.
 
 Planned work:
-- Add Ruff, mypy, and stricter pytest coverage gates.
-- Introduce app-factory patterns to simplify endpoint and dependency injection tests.
-- Parameterize GitHub Actions deploy targets from Terraform outputs or environment configuration.
-- Tighten local auth bypass behaviour so development shortcuts are explicit and safe.
+- [x] Add Ruff, mypy, and pytest coverage gates, enforced in CI before deploy (July 17, 2026 — coverage floor 60%, ratchet upward).
+- [ ] Introduce app-factory patterns to simplify endpoint and dependency injection tests.
+- [ ] Parameterize GitHub Actions deploy targets from Terraform outputs or environment configuration.
+- [ ] Tighten local auth bypass behaviour so development shortcuts are explicit and safe.
 
 ## Later: Platform Maturity
 
