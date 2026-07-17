@@ -158,7 +158,27 @@ data: <token>\n\n
 data: [DONE]\n\n
 ```
 
-Cache hits are served as a single synthetic SSE event followed by `[DONE]`. Errors emit `data: [ERROR] All providers failed\n\n`.
+Cache hits are served as a single synthetic SSE event followed by `[DONE]`. Errors emit `data: [ERROR] All providers failed\n\n`; a provider failure after chunks were already delivered emits `data: [ERROR] Stream interrupted\n\n` (partial output is never cached).
+
+---
+
+### `GET /v1/usage`
+
+Current-month usage and estimated spend for the calling API key.
+
+```json
+{
+  "caller_id": "caller_123",
+  "month": "2026-07",
+  "request_count": 42,
+  "cache_hits": 10,
+  "input_tokens": 5000,
+  "output_tokens": 2500,
+  "estimated_cost_usd": 0.0375
+}
+```
+
+Backed by a DynamoDB table (`ai-platform-usage`) with one atomically-incremented daily bucket per caller. Streaming requests are billed with real token counts reported by the provider at stream end.
 
 ---
 

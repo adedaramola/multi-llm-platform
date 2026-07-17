@@ -49,7 +49,7 @@ Success criteria:
 - The system has a cleaner async story for background work and cache population.
 
 Planned work:
-- Add per-caller token and spend accounting.
-- Add richer routing telemetry and evaluation datasets.
-- Move non-critical async work to durable queues where appropriate.
-- Revisit tracing, dashboards, and SLO-aligned alerting.
+- [x] Add per-caller token and spend accounting — DynamoDB daily buckets, real streaming token capture via provider usage callbacks, and a `GET /v1/usage` endpoint (July 17, 2026).
+- [ ] Add richer routing telemetry and evaluation datasets.
+- [ ] Move non-critical async work to durable queues where appropriate.
+- [ ] Revisit tracing, dashboards, and SLO-aligned alerting.
