@@ -184,8 +184,7 @@ jobs:
             --region us-east-1 \
             --cli-binary-format raw-in-base64-out \
             --payload '{}' health-checker-result.json
-          jq -e '.statusCode == 200 and (.results | length) >= 3 and \
-            ([.results[].healthy] | all)' \
+          jq -e '.statusCode == 200 and (.results | length) >= 3 and ([.results[].healthy] | all)' \
             health-checker-result.json
 
           API_URL=$(aws apigatewayv2 get-apis --region us-east-1 \
