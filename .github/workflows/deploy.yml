@@ -18,6 +18,11 @@ permissions:
   id-token: write   # required for OIDC token
   contents: read
 
+env:
+  # GitHub-hosted runners support Node.js 24. Force any JavaScript action that
+  # has not yet changed its metadata default to run on the supported runtime.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   # ── Tests ──────────────────────────────────────────────────────────────────
   test:
@@ -26,9 +31,9 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -52,7 +57,7 @@ jobs:
           cd ai-platform
           python -m pytest tests/ -v --tb=short
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
 
       - name: Validate Terraform
         run: |
@@ -72,22 +77,22 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
           mask-aws-account-id: true
 
       - name: Set up QEMU (required to run arm64 containers on x86 runners)
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build Lambda zip (linux/arm64)
         run: |
@@ -132,7 +137,14 @@ jobs:
             STATUS=$(aws lambda get-provisioned-concurrency-config \
               --function-name ai-platform-gateway-production \
               --qualifier live --region us-east-1 \
-              --query Status --output text 2>/dev/null || true)
+              --query Status --output text)
+            if [ "$STATUS" = "FAILED" ]; then
+              aws lambda get-provisioned-concurrency-config \
+                --function-name ai-platform-gateway-production \
+                --qualifier live --region us-east-1 \
+                --query '{status:Status,reason:StatusReason}' --output json
+              exit 1
+            fi
             ALIAS_VERSION=$(aws lambda get-alias \
               --function-name ai-platform-gateway-production \
               --name live --region us-east-1 \
