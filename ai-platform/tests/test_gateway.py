@@ -65,6 +65,22 @@ from ai_platform.providers.base import ProviderConfig, ProviderResponse
 from ai_platform.router.router import StreamInterruptedError
 
 
+def test_resolve_pg_dsn_uses_complete_rds_secret():
+    settings = SimpleNamespace(
+        pg_dsn="",
+        pg_secret_arn="rds-secret-arn",
+        pg_host="aurora.internal",
+        pg_port=5432,
+        pg_database="ai_platform",
+    )
+    secret = '{"username":"platform_admin","password":"p@ss"}'
+
+    with patch.object(gateway, "fetch_secret_value", return_value=secret):
+        dsn = gateway._resolve_pg_dsn(settings)
+
+    assert dsn == "postgresql://platform_admin:p%40ss@aurora.internal:5432/ai_platform"
+
+
 @dataclass
 class FakeCacheResult:
     response: str

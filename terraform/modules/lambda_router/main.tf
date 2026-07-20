@@ -107,7 +107,11 @@ resource "aws_lambda_function" "gateway" {
       ANTHROPIC_SECRET_ARN = var.anthropic_secret_arn
       OPENAI_SECRET_ARN    = var.openai_secret_arn
       PG_SECRET_ARN        = var.pg_secret_arn
+      PG_HOST              = var.pg_host
+      PG_PORT              = "5432"
+      PG_DATABASE          = "ai_platform"
       CACHE_ENABLED        = "true"
+      RATE_LIMIT_FAIL_OPEN = "false"
       LOG_LEVEL            = var.environment == "production" ? "INFO" : "DEBUG"
     }
   }

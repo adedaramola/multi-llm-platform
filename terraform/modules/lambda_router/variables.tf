@@ -10,6 +10,7 @@ variable "usage_table_name" { type = string }
 variable "anthropic_secret_arn" { type = string }
 variable "openai_secret_arn" { type = string }
 variable "pg_secret_arn" { type = string }
+variable "pg_host" { type = string }
 variable "redis_endpoint" { type = string }
 variable "lambda_package_path" {
   type    = string

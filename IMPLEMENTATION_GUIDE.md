@@ -13,7 +13,7 @@
 | Phase 6 — Semantic Cache | ✅ Done | Redis + Aurora cache live; cache hit confirmed (934ms → 143ms) |
 | Phase 7 — Health Checker | ✅ Done | Scheduled Lambda, Nova Micro, all 3 providers healthy |
 | Phase 8 — CI/CD | ✅ Done | GitHub Actions OIDC pipeline green; 27/27 tests, full deploy, smoke test |
-| Phase 9 — Tests | ✅ Done | 27 pytest tests covering policies, router, health registry, and gateway endpoints; passing in CI |
+| Phase 9 — Tests | ✅ Done | 68 pytest tests; 76.27% coverage with auth, rate-limit, cache, health, router, and gateway coverage |
 | Phase 10 — Hardening | ✅ Done | Provisioned concurrency (2 warm instances); WAF skipped — not supported on API GW v2 HTTP APIs |
 | Phase 11 — Improvements | ✅ Done | Bug fixes, streaming endpoint, model_preference routing, settings-driven thresholds |
 
@@ -83,7 +83,11 @@ terraform init
 terraform apply
 ```
 
-After the caching layer is up, run the pgvector migration via the **RDS Data API** (Aurora is in a private subnet — direct `psql` access from your laptop is not possible):
+The root Terraform module automatically runs the idempotent pgvector migration
+through the **RDS Data API** after Aurora is ready. The implementation lives in
+`terraform/scripts/migrate_pgvector.sh`; no manual database step is required.
+
+For troubleshooting, the equivalent manual sequence is:
 
 ```bash
 CLUSTER_ARN=$(aws rds describe-db-clusters \
@@ -440,8 +444,8 @@ resource "aws_lambda_provisioned_concurrency_config" "gateway" {
 
 - [ ] WAF — add CloudFront layer if external-facing WAF is required (API GW v2 does not support WAFv2 directly)
 - [ ] `deletion_protection = true` on Aurora cluster
-- [ ] S3 Terraform state bucket has versioning enabled
-- [ ] All secrets in Secrets Manager, not in env vars
+- [x] S3 Terraform state bucket has versioning enabled
+- [x] Runtime secrets are in Secrets Manager, not Lambda environment variables
 - [ ] CloudWatch alarms active and SNS email confirmed
 - [ ] At least 2 API keys exist for different applications
 - [ ] Cache hit rate > 20% after 24 hours of traffic
@@ -641,4 +645,4 @@ logger.info("provider_healthy", extra={"provider": name, "latency_ms": ms})
 
 ---
 
-*Last updated: 2026-05-27 — Terraform apply complete, 27 tests, AWS smoke/reliability suite validated.*
+*Last updated: 2026-07-20 — hardened Terraform apply complete, 68 tests, AWS smoke/reliability suite validated.*

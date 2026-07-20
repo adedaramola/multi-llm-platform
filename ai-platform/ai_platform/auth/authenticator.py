@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import HTTPException, Request
 
 from ..config.settings import get_settings
@@ -62,7 +62,7 @@ class Authenticator:
                 None, lambda: self._table.get_item(Key={"key_hash": key_hash})
             )
             item = response.get("Item")
-        except ClientError as exc:
+        except (BotoCoreError, ClientError) as exc:
             logger.error("dynamo_auth_error", extra={"error": str(exc)})
             raise HTTPException(status_code=503, detail="Auth service unavailable") from exc
 

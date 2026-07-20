@@ -10,3 +10,7 @@ output "pg_secret_arn" {
 output "pg_cluster_endpoint" {
   value = aws_rds_cluster.pgvector.endpoint
 }
+
+output "pg_cluster_arn" {
+  value = aws_rds_cluster.pgvector.arn
+}

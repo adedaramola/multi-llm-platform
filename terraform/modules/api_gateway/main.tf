@@ -70,7 +70,8 @@ resource "aws_apigatewayv2_route" "health" {
 resource "aws_lambda_permission" "api_gw" {
   statement_id  = "AllowAPIGWInvoke"
   action        = "lambda:InvokeFunction"
-  function_name = var.lambda_arn
+  function_name = var.lambda_function_arn
+  qualifier     = "live"
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.main.execution_arn}/*/*"
 }

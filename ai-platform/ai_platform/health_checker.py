@@ -37,32 +37,27 @@ async def _check_and_record(
     except TimeoutError:
         healthy = False
     latency_ms = int((time.perf_counter() - start) * 1000)
+    status = "healthy"
 
     if healthy:
         # mark_success writes status=healthy and resets counter
         registry.mark_success(provider.name)
-        logger.info(
-            "provider_healthy",
-            extra={"provider": provider.name, "latency_ms": latency_ms},
-        )
+        logger.info("provider_healthy: provider=%s latency_ms=%d", provider.name, latency_ms)
     else:
-        # Directly write unhealthy — mark_failure only increments a counter and
-        # uses if_not_exists on status, so it never flips an existing "healthy" record.
-        try:
-            registry._table.put_item(Item={
-                "provider_name": provider.name,
-                "status": "unhealthy",
-                "consecutive_failures": UNHEALTHY_THRESHOLD,
-                "updated_at": int(time.time()),
-            })
-        except Exception as exc:
-            logger.error("health_write_failed", extra={"error": str(exc)})
+        status = registry.record_probe_failure(provider.name, UNHEALTHY_THRESHOLD)
         logger.warning(
-            "provider_unhealthy",
-            extra={"provider": provider.name, "latency_ms": latency_ms},
+            "provider_%s: provider=%s latency_ms=%d",
+            status,
+            provider.name,
+            latency_ms,
         )
 
-    return {"provider": provider.name, "healthy": healthy, "latency_ms": latency_ms}
+    return {
+        "provider": provider.name,
+        "healthy": healthy,
+        "latency_ms": latency_ms,
+        "status": status,
+    }
 
 
 async def _run_checks() -> list[dict]:
@@ -92,8 +87,20 @@ async def _run_checks() -> list[dict]:
 
     registry = ProviderHealthRegistry()
 
-    tasks = [_check_and_record(p, registry) for p in providers]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        tasks = [_check_and_record(p, registry) for p in providers]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        close_results = await asyncio.gather(
+            *(provider.close() for provider in providers),
+            return_exceptions=True,
+        )
+        for provider, result in zip(providers, close_results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "provider_close_failed",
+                    extra={"provider": provider.name, "error": str(result)},
+                )
 
     # Flatten any unexpected exceptions into failed results
     clean: list[dict] = []

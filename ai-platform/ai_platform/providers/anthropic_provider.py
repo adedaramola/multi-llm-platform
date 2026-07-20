@@ -132,3 +132,6 @@ class AnthropicProvider(BaseProvider):
             return bool(resp.content)
         except Exception:
             return False
+
+    async def close(self) -> None:
+        await self._client.close()

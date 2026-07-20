@@ -21,3 +21,8 @@ output "anthropic_secret_arn" {
 output "openai_secret_arn" {
   value = aws_secretsmanager_secret.openai.arn
 }
+
+output "bootstrap_api_key_secret_arn" {
+  description = "Secrets Manager ARN containing the generated bootstrap client API key"
+  value       = aws_secretsmanager_secret.bootstrap_api_key.arn
+}

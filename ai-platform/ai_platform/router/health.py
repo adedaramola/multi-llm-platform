@@ -1,6 +1,6 @@
 """
 Provider health registry backed by DynamoDB.
-Health status is updated by a background Lambda (scheduled every 2 minutes).
+Health status is updated by a background Lambda (scheduled every 5 minutes).
 The gateway reads health flags; it does NOT perform health checks inline.
 """
 from __future__ import annotations
@@ -111,6 +111,38 @@ class ProviderHealthRegistry:
             )
         except ClientError:
             pass
+
+    def record_probe_failure(self, provider_name: str, unhealthy_threshold: int) -> str:
+        """Persist a scheduled-probe failure and return its resulting status."""
+        status = "degraded"
+        try:
+            response = self._table.update_item(
+                Key={"provider_name": provider_name},
+                UpdateExpression=(
+                    "ADD consecutive_failures :one "
+                    "SET updated_at = :ts"
+                ),
+                ExpressionAttributeValues={
+                    ":one": 1,
+                    ":ts": int(self._time_fn()),
+                },
+                ReturnValues="ALL_NEW",
+            )
+            failures = int(response["Attributes"]["consecutive_failures"])
+            status = "unhealthy" if failures >= unhealthy_threshold else "degraded"
+            self._table.update_item(
+                Key={"provider_name": provider_name},
+                UpdateExpression="SET #s = :status",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":status": status},
+            )
+        except Exception:
+            # Health writes must not make the scheduled checker fail. The next
+            # probe will retry and successful probes reset the persisted count.
+            pass
+
+        self._cache[provider_name] = status
+        return status
 
 
 _registry: ProviderHealthRegistry | None = None

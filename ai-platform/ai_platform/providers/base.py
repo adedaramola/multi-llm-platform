@@ -87,3 +87,7 @@ class BaseProvider(ABC):
     async def health_check(self) -> bool:
         """Lightweight liveness check — should complete in < 2 seconds."""
         ...
+
+    async def close(self) -> None:
+        """Release provider resources while the owning event loop is active."""
+        return None

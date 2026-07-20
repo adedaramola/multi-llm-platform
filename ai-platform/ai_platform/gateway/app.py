@@ -11,6 +11,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
+from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -36,7 +37,7 @@ from ..providers.bedrock_provider import BedrockProvider, bedrock_haiku_config, 
 from ..providers.openai_provider import OpenAIProvider, gpt4o_config, gpt4o_mini_config
 from ..router.health import get_health_registry
 from ..router.router import LLMRouter, StreamInterruptedError
-from ..utils import fetch_secret
+from ..utils import fetch_secret, fetch_secret_value
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,14 +57,19 @@ def _resolve_pg_dsn(settings) -> str:
     if not settings.pg_secret_arn:
         return ""
     try:
-        raw = fetch_secret(settings.pg_secret_arn)
+        raw = fetch_secret_value(settings.pg_secret_arn)
         creds = json.loads(raw)
-        host = creds["host"]
-        port = creds.get("port", 5432)
+        host = creds.get("host") or settings.pg_host
+        if not host:
+            raise ValueError("PostgreSQL host is not configured")
+        port = creds.get("port", settings.pg_port)
         user = creds["username"]
         password = creds["password"]
-        dbname = creds.get("dbname", "ai_platform")
-        dsn = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+        dbname = creds.get("dbname", settings.pg_database)
+        dsn = (
+            f"postgresql://{quote(user, safe='')}:{quote(password, safe='')}"
+            f"@{host}:{port}/{quote(dbname, safe='')}"
+        )
         logger.info("pg_dsn_resolved_from_secret")
         return dsn
     except Exception as exc:

@@ -105,3 +105,6 @@ class OpenAIProvider(BaseProvider):
             return bool(resp.choices)
         except Exception:
             return False
+
+    async def close(self) -> None:
+        await self._client.close()

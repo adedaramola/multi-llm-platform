@@ -52,6 +52,11 @@ def _cache_key(prompt: str, model_constraint: str = "") -> str:
     return hashlib.sha256(f"{constraint}\x00{normalized}".encode()).hexdigest()
 
 
+def _vector_literal(embedding: list[float]) -> str:
+    """Serialize an embedding for pgvector when asyncpg has no vector codec."""
+    return json.dumps(embedding, separators=(",", ":"))
+
+
 class SemanticCache:
     def __init__(self, pg_dsn: str | None = None) -> None:
         settings = get_settings()
@@ -116,7 +121,7 @@ class SemanticCache:
                     model_used=data.get("model_used", ""),
                 )
         except Exception as exc:
-            logger.warning("redis_lookup_failed", extra={"error": str(exc)})
+            logger.warning("redis_lookup_failed: %s", exc)
 
         # ── Layer 2: pgvector semantic search ─────────────────────────────────
         if not self._pg_dsn:
@@ -136,7 +141,7 @@ class SemanticCache:
                 ORDER BY embedding <=> $1::vector
                 LIMIT 1
                 """,
-                embedding,
+                _vector_literal(embedding),
                 constraint,
             )
             if row and row["similarity"] >= self._settings.semantic_cache_threshold:
@@ -153,7 +158,7 @@ class SemanticCache:
                     model_used=row["model_used"],
                 )
         except Exception as exc:
-            logger.warning("pgvector_lookup_failed", extra={"error": str(exc)})
+            logger.warning("pgvector_lookup_failed: %s", exc)
 
         return None
 
@@ -203,7 +208,7 @@ class SemanticCache:
                         created_at = NOW()
                 """,
                 prompt_hash,
-                embedding,
+                _vector_literal(embedding),
                 response,
                 model_used,
                 input_tokens,
@@ -211,7 +216,7 @@ class SemanticCache:
                 expires_at,
             )
         except Exception as exc:
-            logger.warning("pgvector_write_failed", extra={"error": str(exc)})
+            logger.warning("pgvector_write_failed: %s", exc)
 
     async def _promote_to_redis(
         self,
@@ -228,4 +233,4 @@ class SemanticCache:
             ttl = ttl or self._settings.redis_ttl_seconds
             await redis.setex(f"cache:{prompt_hash}", ttl, payload)
         except Exception as exc:
-            logger.warning("redis_write_failed", extra={"error": str(exc)})
+            logger.warning("redis_write_failed: %s", exc)

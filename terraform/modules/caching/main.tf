@@ -32,8 +32,7 @@ resource "aws_rds_cluster" "pgvector" {
   db_subnet_group_name        = aws_db_subnet_group.pgvector.name
   storage_encrypted           = true
   deletion_protection         = var.environment != "production"
-  skip_final_snapshot         = var.environment != "production"
-  final_snapshot_identifier   = var.environment == "production" ? "ai-platform-final-${formatdate("YYYYMMDD", timestamp())}" : null
+  skip_final_snapshot         = true
 
   enable_http_endpoint = true # RDS Data API — allows migration without bastion host
 

@@ -1,5 +1,7 @@
 # ── GitHub OIDC Provider ──────────────────────────────────────────────────────
 # Allows GitHub Actions to assume an AWS IAM role without long-lived secrets.
+data "aws_region" "current" {}
+
 resource "aws_iam_openid_connect_provider" "github" {
   url = "https://token.actions.githubusercontent.com"
 
@@ -55,11 +57,19 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
           "lambda:PublishVersion",
           "lambda:UpdateAlias",
           "lambda:GetAlias",
+          "lambda:GetProvisionedConcurrencyConfig",
+          "lambda:InvokeFunction",
         ]
         Resource = [
           var.gateway_function_arn,
           var.health_checker_function_arn,
         ]
+      },
+      {
+        Sid      = "ApiGatewayDiscovery"
+        Effect   = "Allow"
+        Action   = ["apigateway:GET"]
+        Resource = "arn:aws:apigateway:${data.aws_region.current.name}::/apis"
       },
     ]
   })
