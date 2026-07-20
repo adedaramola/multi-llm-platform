@@ -67,7 +67,7 @@ resource "aws_dynamodb_table" "health" {
 resource "aws_secretsmanager_secret" "anthropic" {
   name                    = "ai-platform/${var.environment}/anthropic-api-key"
   description             = "Anthropic API key for AI Platform"
-  recovery_window_in_days = 7
+  recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret_version" "anthropic" {
@@ -78,10 +78,52 @@ resource "aws_secretsmanager_secret_version" "anthropic" {
 resource "aws_secretsmanager_secret" "openai" {
   name                    = "ai-platform/${var.environment}/openai-api-key"
   description             = "OpenAI API key for AI Platform"
-  recovery_window_in_days = 7
+  recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret_version" "openai" {
   secret_id     = aws_secretsmanager_secret.openai.id
   secret_string = jsonencode({ api_key = var.openai_key })
+}
+
+# ── Bootstrap client credential ───────────────────────────────────────────────
+# A fresh deployment is immediately usable without a manual DynamoDB write.
+# The raw key is held in Secrets Manager; DynamoDB stores only its SHA-256 hash.
+resource "random_password" "bootstrap_api_key" {
+  length  = 64
+  special = false
+}
+
+locals {
+  bootstrap_api_key = "mlp_${random_password.bootstrap_api_key.result}"
+}
+
+resource "aws_secretsmanager_secret" "bootstrap_api_key" {
+  name_prefix             = "ai-platform/${var.environment}/bootstrap-client-api-key-"
+  description             = "Bootstrap client API key for AI Platform"
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "bootstrap_api_key" {
+  secret_id     = aws_secretsmanager_secret.bootstrap_api_key.id
+  secret_string = local.bootstrap_api_key
+}
+
+resource "aws_dynamodb_table_item" "bootstrap_api_key" {
+  table_name = aws_dynamodb_table.api_keys.name
+  hash_key   = aws_dynamodb_table.api_keys.hash_key
+
+  item = jsonencode({
+    key_hash   = { S = sha256(local.bootstrap_api_key) }
+    caller_id  = { S = "bootstrap-client" }
+    app_name   = { S = "bootstrap" }
+    rpm_limit  = { N = "60" }
+    rpd_limit  = { N = "5000" }
+    active     = { BOOL = true }
+    created_at = { S = timestamp() }
+  })
+
+  lifecycle {
+    ignore_changes = [item]
+  }
 }

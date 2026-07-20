@@ -2,5 +2,8 @@
 # backend.hcl is gitignored — never commit it.
 #
 # Usage: terraform init -backend-config=backend.hcl
+# Create/harden the bucket first:
+# STATE_BUCKET="ai-platform-tfstate-<your-aws-account-id>" \
+#   AWS_REGION_NAME="us-east-1" ./scripts/bootstrap_backend.sh
 
 bucket = "ai-platform-tfstate-<your-aws-account-id>"

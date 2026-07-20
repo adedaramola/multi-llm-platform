@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 
-from ai_platform.cache.semantic_cache import SemanticCache
+from ai_platform.cache.semantic_cache import SemanticCache, _vector_literal
 from ai_platform.config.settings import Settings, get_settings
 
 
@@ -42,6 +42,10 @@ def _track_embed_calls(cache: SemanticCache) -> list[str]:
 
     cache._embed = fake_embed
     return calls
+
+
+def test_vector_literal_is_accepted_pgvector_text_form():
+    assert _vector_literal([0.25, -1.0, 0.0]) == "[0.25,-1.0,0.0]"
 
 
 # ── DSN wiring ─────────────────────────────────────────────────────────────────

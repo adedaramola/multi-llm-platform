@@ -12,3 +12,8 @@ output "cloudwatch_dashboard_url" {
   description = "CloudWatch operational dashboard URL"
   value       = module.monitoring.dashboard_url
 }
+
+output "bootstrap_api_key_secret_arn" {
+  description = "Retrieve this secret once to call the deployed API"
+  value       = module.auth.bootstrap_api_key_secret_arn
+}

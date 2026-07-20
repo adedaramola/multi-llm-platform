@@ -57,8 +57,8 @@ resource "aws_lambda_function" "health_checker" {
   handler          = "ai_platform.health_checker.handler"
   runtime          = "python3.12"
   architectures    = ["arm64"]
-  timeout          = 60   # 3 providers × 20s timeout + overhead
-  memory_size      = 256  # lighter than gateway — no web framework
+  timeout          = 60  # 3 providers × 20s timeout + overhead
+  memory_size      = 256 # lighter than gateway — no web framework
 
   environment {
     variables = {
@@ -67,7 +67,7 @@ resource "aws_lambda_function" "health_checker" {
       HEALTH_TABLE         = var.health_table_name
       ANTHROPIC_SECRET_ARN = var.anthropic_secret_arn
       OPENAI_SECRET_ARN    = var.openai_secret_arn
-      CACHE_ENABLED        = "false"  # not needed for health checks
+      CACHE_ENABLED        = "false" # not needed for health checks
     }
   }
 

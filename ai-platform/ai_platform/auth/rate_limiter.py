@@ -30,6 +30,7 @@ class RateLimiter:
         self._table = boto3.resource("dynamodb", region_name=settings.aws_region).Table(
             settings.rate_limit_table
         )
+        self._fail_open = settings.rate_limit_fail_open
 
     async def check_and_increment(self, caller: CallerIdentity) -> None:
         now = int(time.time())
@@ -69,8 +70,13 @@ class RateLimiter:
         except HTTPException:
             raise
         except Exception as exc:
-            # On any AWS error (incl. no credentials locally), allow the request
-            logger.error("rate_limiter_error", extra={"error": str(exc)})
+            logger.error("rate_limiter_error: %s", exc)
+            if self._fail_open:
+                return
+            raise HTTPException(
+                status_code=503,
+                detail="Rate limit service unavailable",
+            ) from exc
 
     def _increment_sync(self, key: str, ttl: int) -> int:
         """Sync DynamoDB call — run via executor to avoid blocking the event loop."""

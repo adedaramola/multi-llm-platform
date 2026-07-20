@@ -17,17 +17,27 @@ class FakeTable:
             ]
         }
 
-    def update_item(self, Key, UpdateExpression, ExpressionAttributeNames, ExpressionAttributeValues):
+    def update_item(
+        self,
+        Key,
+        UpdateExpression,
+        ExpressionAttributeValues,
+        ExpressionAttributeNames=None,
+        ReturnValues=None,
+    ):
         provider_name = Key["provider_name"]
         item = self.items.get(
             provider_name,
             {"provider_name": provider_name, "consecutive_failures": 0},
         )
-        item["consecutive_failures"] = item.get("consecutive_failures", 0) + int(
-            ExpressionAttributeValues[":one"]
-        )
-        item["status"] = ExpressionAttributeValues[":status"]
-        item["updated_at"] = ExpressionAttributeValues[":ts"]
+        if ":one" in ExpressionAttributeValues:
+            item["consecutive_failures"] = item.get("consecutive_failures", 0) + int(
+                ExpressionAttributeValues[":one"]
+            )
+        if ":status" in ExpressionAttributeValues:
+            item["status"] = ExpressionAttributeValues[":status"]
+        if ":ts" in ExpressionAttributeValues:
+            item["updated_at"] = ExpressionAttributeValues[":ts"]
         self.items[provider_name] = item
         return {"Attributes": item}
 
@@ -83,3 +93,20 @@ def test_mark_success_closes_half_open_circuit():
 
     registry.mark_success("openai-gpt4o")
     assert registry.is_healthy("openai-gpt4o")
+
+
+def test_scheduled_probe_requires_consecutive_failures_before_unhealthy():
+    table = FakeTable()
+    registry = ProviderHealthRegistry(
+        table=table,
+        settings=Settings(health_table="test-health"),
+        time_fn=lambda: 3_000.0,
+    )
+
+    assert registry.record_probe_failure("anthropic-haiku", 3) == "degraded"
+    assert registry.record_probe_failure("anthropic-haiku", 3) == "degraded"
+    assert registry.record_probe_failure("anthropic-haiku", 3) == "unhealthy"
+    assert table.items["anthropic-haiku"]["consecutive_failures"] == 3
+
+    registry.mark_success("anthropic-haiku")
+    assert table.items["anthropic-haiku"]["consecutive_failures"] == 0

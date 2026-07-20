@@ -291,6 +291,9 @@ All configuration is via environment variables (or a `.env` file). Loaded once a
 | `REDIS_TTL_SECONDS` | `3600` | Default Redis TTL |
 | `PG_DSN` | `""` | Aurora pgvector DSN (or use `PG_SECRET_ARN`) |
 | `PG_SECRET_ARN` | `""` | RDS-managed secret ARN — DSN resolved at cold start |
+| `PG_HOST` | `""` | Aurora cluster endpoint used with the RDS-managed credentials |
+| `PG_PORT` | `5432` | PostgreSQL port |
+| `PG_DATABASE` | `ai_platform` | PostgreSQL database name |
 | `SEMANTIC_CACHE_THRESHOLD` | `0.92` | Cosine similarity threshold for cache hits |
 | `CACHE_ENABLED` | `true` | Set to `false` to disable all caching |
 | `CACHE_WRITE_TIMEOUT_MS` | `750` | Upper bound for inline cache persistence before the response continues |
@@ -299,6 +302,7 @@ All configuration is via environment variables (or a `.env` file). Loaded once a
 | `HEALTH_TABLE` | `ai-platform-provider-health` | DynamoDB table for provider health state |
 | `DEFAULT_RPM` | `60` | Default requests per minute (overridden per key) |
 | `DEFAULT_RPD` | `5000` | Default requests per day (overridden per key) |
+| `RATE_LIMIT_FAIL_OPEN` | `false` | Allow requests when DynamoDB rate limiting fails; keep `false` in production |
 | `COMPLEXITY_LOW_THRESHOLD` | `0.3` | Complexity score below which low-tier is used |
 | `COMPLEXITY_MID_THRESHOLD` | `0.7` | Complexity score below which mid-tier is used |
 | `MAX_PROVIDER_RETRIES` | `2` | Retries per provider before marking unhealthy |
@@ -311,12 +315,18 @@ All configuration is via environment variables (or a `.env` file). Loaded once a
 
 ## Deployment
 
-Infrastructure is managed with Terraform. A GitHub Actions CI/CD pipeline handles plan and deploy via an OIDC-federated IAM role (no long-lived credentials).
+Infrastructure is managed with Terraform. GitHub Actions validates Terraform
+on every change and deploys Lambda code from `main` through an OIDC-federated
+IAM role (no long-lived AWS credentials).
 
 ### First-time setup
 
 ```bash
 cd terraform
+
+# Create or harden the private, encrypted, versioned state bucket
+STATE_BUCKET="ai-platform-tfstate-<your-aws-account-id>" \
+  AWS_REGION_NAME="us-east-1" ./scripts/bootstrap_backend.sh
 
 # Copy and edit your tfvars
 cp terraform.tfvars.example terraform.tfvars
@@ -329,6 +339,25 @@ terraform plan
 terraform apply
 ```
 
+`terraform apply` is self-bootstrapping: it creates the pgvector extension and
+semantic-cache schema, generates an initial client API key, stores only its hash
+in DynamoDB, and places the raw key in Secrets Manager. Retrieve it with:
+
+```bash
+SECRET_ARN=$(terraform output -raw bootstrap_api_key_secret_arn)
+aws secretsmanager get-secret-value \
+  --secret-id "$SECRET_ARN" \
+  --query SecretString --output text
+```
+
+Provider secrets keep stable names and use immediate deletion during an explicit
+Terraform destroy; the generated bootstrap secret uses a unique name. A destroy
+followed by an immediate redeploy therefore needs no Secrets Manager cleanup.
+
+Terraform state contains sensitive values even when Terraform redacts them from
+CLI output. Keep the S3 backend private, encrypted, and versioned; never commit a
+local state or saved plan file.
+
 `backend.hcl` is gitignored. See [backend.hcl.example](terraform/backend.hcl.example) for the required fields.
 
 ### Deploy a Lambda code update
@@ -337,7 +366,7 @@ CI handles this automatically on merge to `main`. For a manual push see the [Qui
 
 For a full module-by-module breakdown of what Terraform provisions, see [ARCHITECTURE.md §8](ARCHITECTURE.md#8-terraform-infrastructure-structure).
 
-### Current Deployment Status (May 27, 2026)
+### Current Deployment Status (July 20, 2026)
 
 The platform has been successfully deployed and validated in AWS. Retrieve the live values for your current environment from Terraform outputs:
 

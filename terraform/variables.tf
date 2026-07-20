@@ -15,13 +15,13 @@ variable "environment" {
 }
 
 variable "anthropic_api_key" {
-  description = "Anthropic API key — stored in Secrets Manager, not state"
+  description = "Anthropic API key — copied into Secrets Manager; protect the encrypted Terraform state"
   type        = string
   sensitive   = true
 }
 
 variable "openai_api_key" {
-  description = "OpenAI API key — stored in Secrets Manager, not state"
+  description = "OpenAI API key — copied into Secrets Manager; protect the encrypted Terraform state"
   type        = string
   sensitive   = true
   default     = ""

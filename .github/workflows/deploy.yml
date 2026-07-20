@@ -23,6 +23,7 @@ jobs:
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -51,12 +52,24 @@ jobs:
           cd ai-platform
           python -m pytest tests/ -v --tb=short
 
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Validate Terraform
+        run: |
+          terraform -chdir=terraform fmt -check -recursive
+          terraform -chdir=terraform init -backend=false -input=false
+          terraform -chdir=terraform validate
+
   # ── Deploy (main branch only) ───────────────────────────────────────────────
   deploy:
     name: Deploy to Production
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    concurrency:
+      group: production-lambda-deploy
+      cancel-in-progress: false
 
     steps:
       - uses: actions/checkout@v4
@@ -113,6 +126,34 @@ jobs:
             --function-version "$VERSION" \
             --region us-east-1
 
+          # AWS temporarily routes the alias to the old version while warming
+          # provisioned concurrency. Do not smoke-test until cutover is exact.
+          for attempt in $(seq 1 60); do
+            STATUS=$(aws lambda get-provisioned-concurrency-config \
+              --function-name ai-platform-gateway-production \
+              --qualifier live --region us-east-1 \
+              --query Status --output text 2>/dev/null || true)
+            ALIAS_VERSION=$(aws lambda get-alias \
+              --function-name ai-platform-gateway-production \
+              --name live --region us-east-1 \
+              --query FunctionVersion --output text)
+            ROUTING=$(aws lambda get-alias \
+              --function-name ai-platform-gateway-production \
+              --name live --region us-east-1 \
+              --query RoutingConfig.AdditionalVersionWeights --output json)
+            if [ "$STATUS" = "READY" ] \
+              && [ "$ALIAS_VERSION" = "$VERSION" ] \
+              && { [ "$ROUTING" = "null" ] || [ "$ROUTING" = "{}" ]; }; then
+              echo "Gateway version $VERSION is fully live"
+              break
+            fi
+            if [ "$attempt" = "60" ]; then
+              echo "Timed out waiting for gateway version $VERSION"
+              exit 1
+            fi
+            sleep 5
+          done
+
       - name: Deploy health-checker Lambda
         run: |
           aws lambda update-function-code \
@@ -126,7 +167,21 @@ jobs:
 
       - name: Smoke test
         run: |
-          API_URL="https://jo1sunwnme.execute-api.us-east-1.amazonaws.com"
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$API_URL/health")
+          aws lambda invoke \
+            --function-name ai-platform-health-checker-production \
+            --region us-east-1 \
+            --cli-binary-format raw-in-base64-out \
+            --payload '{}' health-checker-result.json
+          jq -e '.statusCode == 200 and (.results | length) >= 3 and \
+            ([.results[].healthy] | all)' \
+            health-checker-result.json
+
+          API_URL=$(aws apigatewayv2 get-apis --region us-east-1 \
+            --query "Items[?Name=='ai-platform-production'].ApiEndpoint | [0]" \
+            --output text)
+          [ -n "$API_URL" ] && [ "$API_URL" != "None" ]
+          STATUS=$(curl -sS --connect-timeout 10 --max-time 45 \
+            -o health.json -w "%{http_code}" "$API_URL/health")
           echo "Health check status: $STATUS"
-          [ "$STATUS" = "200" ] || (echo "Smoke test failed" && exit 1)
+          [ "$STATUS" = "200" ]
+          jq -e '.status == "ok"' health.json

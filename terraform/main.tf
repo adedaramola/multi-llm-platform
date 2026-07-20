@@ -58,6 +58,27 @@ module "caching" {
   cache_sg_id        = module.networking.cache_sg_id
 }
 
+# Idempotent schema bootstrap. Re-runs only when the migration script changes
+# or when Terraform creates a new Aurora cluster.
+resource "terraform_data" "pgvector_migration" {
+  triggers_replace = [
+    module.caching.pg_cluster_arn,
+    filesha256("${path.module}/scripts/migrate_pgvector.sh"),
+  ]
+
+  provisioner "local-exec" {
+    command = "${path.module}/scripts/migrate_pgvector.sh"
+    environment = {
+      AWS_REGION_NAME = var.aws_region
+      CLUSTER_ARN     = module.caching.pg_cluster_arn
+      SECRET_ARN      = module.caching.pg_secret_arn
+      DATABASE_NAME   = "ai_platform"
+    }
+  }
+
+  depends_on = [module.caching]
+}
+
 # ── Lambda Gateway ────────────────────────────────────────────────────────────
 module "lambda_router" {
   source             = "./modules/lambda_router"
@@ -78,14 +99,18 @@ module "lambda_router" {
   # Cache
   redis_endpoint = module.caching.redis_endpoint
   pg_secret_arn  = module.caching.pg_secret_arn
+  pg_host        = module.caching.pg_cluster_endpoint
+
+  depends_on = [terraform_data.pgvector_migration]
 }
 
 # ── API Gateway ───────────────────────────────────────────────────────────────
 module "api_gateway" {
-  source            = "./modules/api_gateway"
-  environment       = var.environment
-  lambda_invoke_arn = module.lambda_router.lambda_invoke_arn
-  lambda_arn        = module.lambda_router.lambda_arn
+  source              = "./modules/api_gateway"
+  environment         = var.environment
+  lambda_invoke_arn   = module.lambda_router.lambda_invoke_arn
+  lambda_arn          = module.lambda_router.lambda_arn
+  lambda_function_arn = module.lambda_router.lambda_function_arn
 }
 
 # ── Provider Health Checker (EventBridge scheduled) ──────────────────────────

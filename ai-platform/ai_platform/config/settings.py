@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     redis_ttl_seconds: int = 3600
     pg_dsn: str = ""                       # Aurora Serverless pgvector DSN (direct)
     pg_secret_arn: str = ""               # RDS-managed master user secret ARN
+    pg_host: str = ""                     # Aurora endpoint (RDS secret has credentials only)
+    pg_port: int = 5432
+    pg_database: str = "ai_platform"
     semantic_cache_threshold: float = 0.92
     cache_enabled: bool = True
     cache_write_timeout_ms: int = 750
@@ -44,6 +47,7 @@ class Settings(BaseSettings):
     # ── Rate Limits (defaults, overridden per API key) ────────────────────────
     default_rpm: int = 60       # requests per minute
     default_rpd: int = 5_000    # requests per day
+    rate_limit_fail_open: bool = False
 
     # ── Routing ───────────────────────────────────────────────────────────────
     complexity_low_threshold: float = 0.3
