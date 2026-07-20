@@ -57,13 +57,18 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
           "lambda:PublishVersion",
           "lambda:UpdateAlias",
           "lambda:GetAlias",
-          "lambda:GetProvisionedConcurrencyConfig",
           "lambda:InvokeFunction",
         ]
         Resource = [
           var.gateway_function_arn,
           var.health_checker_function_arn,
         ]
+      },
+      {
+        Sid      = "GatewayProvisionedConcurrencyRead"
+        Effect   = "Allow"
+        Action   = ["lambda:GetProvisionedConcurrencyConfig"]
+        Resource = "${var.gateway_function_arn}:live"
       },
       {
         Sid      = "ApiGatewayDiscovery"

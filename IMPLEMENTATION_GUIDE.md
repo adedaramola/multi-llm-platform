@@ -303,7 +303,7 @@ The workflow at `.github/workflows/deploy.yml` has two jobs:
 - **`test`** — runs on every push and PR; installs dependencies, runs `.venv/bin/python -m pytest tests/ -v --tb=short`
 - **`deploy`** — runs only on pushes to `main` after `test` passes; builds the arm64 zip using Docker + QEMU, deploys both Lambdas, smoke-tests `/health`
 
-> GitHub Actions runners are x86. QEMU (`docker/setup-qemu-action@v3`) is required to run `linux/arm64` containers on them. Without it, the Docker build silently produces an x86 binary that fails with `exec format error` at Lambda runtime.
+> GitHub Actions runners are x86. QEMU (`docker/setup-qemu-action@v4`) is required to run `linux/arm64` containers on them. The workflow uses Node.js 24 action runtimes and forces JavaScript actions onto Node.js 24. Without QEMU, the Docker build can produce an x86 binary that fails with `exec format error` at Lambda runtime.
 
 > The IAM role is scoped to `repo:YOUR_ORG/YOUR_REPO:ref:refs/heads/main` — it cannot be assumed from any other branch or fork.
 
