@@ -113,7 +113,9 @@ jobs:
             --function-name ai-platform-gateway-production \
             --zip-file fileb://ai-platform/dist/ai-platform.zip \
             --architectures arm64 \
-            --region us-east-1
+            --region us-east-1 \
+            --query '{function:FunctionName,version:Version}' \
+            --output json
           aws lambda wait function-updated \
             --function-name ai-platform-gateway-production \
             --region us-east-1
@@ -172,7 +174,9 @@ jobs:
             --function-name ai-platform-health-checker-production \
             --zip-file fileb://ai-platform/dist/ai-platform.zip \
             --architectures arm64 \
-            --region us-east-1
+            --region us-east-1 \
+            --query '{function:FunctionName,version:Version}' \
+            --output json
           aws lambda wait function-updated \
             --function-name ai-platform-health-checker-production \
             --region us-east-1
