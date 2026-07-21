@@ -39,6 +39,9 @@ ai-platform/dist/
 # Claude
 claude.md
 
+# Local planning documents
+IMPROVEMENT_ROADMAP.md
+
 # Coverage
 .coverage
 coverage.xml
