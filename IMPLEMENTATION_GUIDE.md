@@ -1,136 +1,82 @@
 # Multi-LLM Platform — Implementation Guide
 
-## Build Status
+This guide is the shortest supported path from a fresh checkout to a verified AWS deployment. For API details, see [README.md](README.md). For component design and Terraform module details, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-| Phase | Status | Notes |
-|-------|--------|-------|
-| Prerequisites | ✅ Done | AWS CLI, Terraform, Python 3.12, Docker |
-| Phase 1 — Local Service | ✅ Done | Gateway runs, routes to Haiku, real responses confirmed |
-| Phase 2 — AWS Foundation | ✅ Done | VPC, DynamoDB, Secrets Manager, Aurora+pgvector, ElastiCache all live |
-| Phase 3 — Lambda Deploy | ✅ Done | Docker arm64 build, Secrets Manager HTTPS SG fix, cache SG fix |
-| Phase 4 — Auth | ✅ Done | Real API key seeded, dev bypass removed |
-| Phase 5 — Monitoring | ✅ Done | CloudWatch dashboard + SNS alerts live |
-| Phase 6 — Semantic Cache | ✅ Done | Redis + Aurora cache live; cache hit confirmed (934ms → 143ms) |
-| Phase 7 — Health Checker | ✅ Done | Scheduled Lambda, Nova Micro, all 3 providers healthy |
-| Phase 8 — CI/CD | ✅ Done | GitHub Actions OIDC pipeline green; 27/27 tests, full deploy, smoke test |
-| Phase 9 — Tests | ✅ Done | 68 pytest tests; 76.27% coverage with auth, rate-limit, cache, health, router, and gateway coverage |
-| Phase 10 — Hardening | ✅ Done | Provisioned concurrency (2 warm instances); WAF skipped — not supported on API GW v2 HTTP APIs |
-| Phase 11 — Improvements | ✅ Done | Bug fixes, streaming endpoint, model_preference routing, settings-driven thresholds |
+## 1. Local setup
 
-### Live environment
+### Prerequisites
 
-Retrieve current values from Terraform after deploy:
-
-```bash
-cd terraform
-terraform output api_gateway_url
-terraform output lambda_function_name
-terraform output cloudwatch_dashboard_url
-```
-
----
-
-## Prerequisites
-
-- AWS account with admin access
-- AWS CLI configured (`aws configure`)
-- Terraform >= 1.7
 - Python 3.12
 - Docker Desktop
-- Anthropic API key (`sk-ant-...`) and optionally OpenAI (`sk-...`)
+- AWS CLI with credentials configured
+- Terraform 1.7 or newer
+- An AWS account with access to Bedrock and permission to create the resources in this project
+- Anthropic and OpenAI API keys
 
-The `.env` file, `terraform.tfvars`, and `dist/` directory must never be committed. They are already in `.gitignore`.
+Never commit `.env`, `terraform.tfvars`, `backend.hcl`, Terraform state, saved plan files, or `dist/` artifacts.
 
----
-
-## Phase 1 — Local Service
-
-**Goal:** Validate the gateway locally before touching AWS.
-
-Run the service from `ai-platform/`:
+### Configure the application
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn ai_platform.gateway.app:app --host 0.0.0.0 --port 8080 --reload
+cp ai-platform/.env.example ai-platform/.env
 ```
 
-Create `ai-platform/.env` with your keys and `CACHE_ENABLED=false`. Add a dev auth bypass in `authenticator.py` so local testing works without DynamoDB:
+Edit `ai-platform/.env` and supply the provider keys. For local development, keep:
 
-```python
-if get_settings().environment == "dev":
-    return CallerIdentity(caller_id="dev-user", app_name="local",
-                          rpm_limit=1000, rpd_limit=100_000, active=True)
+```dotenv
+ENVIRONMENT=dev
+CACHE_ENABLED=false
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
 ```
 
-Test with `curl http://localhost:8080/health` and a POST to `/v1/chat` with `"budget": "low"`. Expected: response from Claude Haiku.
+In the `dev` environment, any non-empty bearer token is accepted. No DynamoDB table or source-code auth bypass is needed.
 
-> All Python subpackages must live inside `ai_platform/` — relative imports and the Mangum handler depend on this layout.
-
----
-
-## Phase 2 — AWS Foundation
-
-**Goal:** Create the core AWS infrastructure with Terraform.
-
-Create an S3 bucket for Terraform state (append your account ID to make it globally unique) and update the `backend "s3"` block in `terraform/main.tf`. Copy `terraform.tfvars.example` to `terraform.tfvars` and fill in your API keys.
-
-Deploy everything at once — Terraform resolves the dependency order automatically:
+### Install, check, and run
 
 ```bash
-cd terraform
-terraform init
-terraform apply
+cd ai-platform
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+
+ruff check ai_platform tests
+mypy
+python -m pytest tests/ -v --tb=short
+
+uvicorn ai_platform.gateway.app:app --reload --port 8080
 ```
 
-The root Terraform module automatically runs the idempotent pgvector migration
-through the **RDS Data API** after Aurora is ready. The implementation lives in
-`terraform/scripts/migrate_pgvector.sh`; no manual database step is required.
-
-For troubleshooting, the equivalent manual sequence is:
+In another terminal:
 
 ```bash
-CLUSTER_ARN=$(aws rds describe-db-clusters \
-  --db-cluster-identifier ai-platform-pgvector-production \
-  --query "DBClusters[0].DBClusterArn" --output text)
+curl http://localhost:8080/health
 
-SECRET_ARN=$(aws secretsmanager list-secrets \
-  --query "SecretList[?starts_with(Name, 'rds!')].ARN" --output text)
-
-run_sql() {
-  aws rds-data execute-statement \
-    --resource-arn "$CLUSTER_ARN" --secret-arn "$SECRET_ARN" \
-    --database "ai_platform" --sql "$1"
-}
-
-run_sql "CREATE EXTENSION IF NOT EXISTS vector"
-run_sql "CREATE TABLE IF NOT EXISTS semantic_cache (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    prompt_hash TEXT NOT NULL UNIQUE,
-    embedding VECTOR(1536) NOT NULL,
-    response TEXT NOT NULL,
-    model_used TEXT NOT NULL,
-    input_tokens INT DEFAULT 0,
-    output_tokens INT DEFAULT 0,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    expires_at TIMESTAMPTZ)"
-run_sql "CREATE INDEX IF NOT EXISTS semantic_cache_embedding_idx
-    ON semantic_cache USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)"
-run_sql "CREATE INDEX IF NOT EXISTS semantic_cache_hash_idx ON semantic_cache (prompt_hash)"
+curl -X POST http://localhost:8080/v1/chat \
+  -H "Authorization: Bearer dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Say hello in one sentence."}]}'
 ```
 
-> The Data API does not support multi-statement calls — run each SQL statement individually.
-
----
-
-## Phase 3 — Lambda Deploy
-
-**Goal:** Package and deploy the Python service to Lambda.
-
-Lambda runs on `linux/arm64`. Always build the zip inside the Lambda base image — plain `pip install` on macOS produces incompatible binaries:
+You can also run the application with Docker:
 
 ```bash
-cd ai-platform && mkdir -p dist/package
+cd ai-platform
+docker build -t ai-platform .
+docker run --env-file .env -p 8080:8080 ai-platform
+```
+
+## 2. First AWS deployment
+
+Terraform provisions the network, DynamoDB tables, Secrets Manager secrets, Aurora pgvector database, Redis cache, gateway and health-checker Lambdas, API Gateway, monitoring, and GitHub Actions OIDC role. Do not apply individual modules for a normal deployment.
+
+### Build the Lambda package
+
+Lambda uses `linux/arm64`. Build dependencies inside the Lambda image so native packages are compatible when building from macOS or an x86 host:
+
+```bash
+cd ai-platform
+mkdir -p dist/package
 
 docker run --rm --platform linux/arm64 \
   -v "$(pwd)":/src \
@@ -139,510 +85,213 @@ docker run --rm --platform linux/arm64 \
   -c "pip install -r /src/requirements.txt -t /src/dist/package --quiet \
       && cp -r /src/ai_platform /src/dist/package/"
 
-cd dist/package && zip -r ../ai-platform.zip . -q
+cd dist/package
+zip -r ../ai-platform.zip . -q
+cd ../../..
 ```
 
-Deploy Lambda and API Gateway:
+The resulting `ai-platform/dist/ai-platform.zip` is required by the first Terraform apply.
+
+### Bootstrap remote state
+
+Choose a globally unique S3 bucket name, normally including your AWS account ID:
 
 ```bash
 cd terraform
-terraform apply -target=module.lambda_router -target=module.api_gateway
+
+STATE_BUCKET="ai-platform-tfstate-<your-aws-account-id>" \
+  AWS_REGION_NAME="us-east-1" \
+  ./scripts/bootstrap_backend.sh
+
+cp backend.hcl.example backend.hcl
 ```
 
-**Known issues fixed in code:**
+Edit `backend.hcl` and replace the placeholder bucket name.
 
-- **Secrets Manager timeout:** Interface VPC endpoints are ENIs — they require an inbound port 443 rule in their security group. Without it, the Lambda cold start hangs silently for 60 seconds. The fix is in `terraform/modules/networking/main.tf` (HTTPS ingress from `10.0.0.0/16` on the Lambda SG).
-
-- **Redis connection hang:** The caching module originally used `var.lambda_sg_id` for ElastiCache and Aurora. That SG has no inbound rules on 6379/5432. The correct SG is `var.cache_sg_id`. Fixed in `terraform/modules/caching/main.tf`.
-
-> Gateway endpoints (S3, DynamoDB) are route-table entries — they do not need SG rules. Interface endpoints (Secrets Manager, etc.) behave like private IPs and do.
-
----
-
-## Phase 4 — Auth and Rate Limiting
-
-**Goal:** Issue real API keys and remove the local dev bypass.
-
-Generate and seed an API key into DynamoDB:
+### Configure and apply Terraform
 
 ```bash
-API_KEY=$(openssl rand -hex 32)
-KEY_HASH=$(echo -n "$API_KEY" | shasum -a 256 | awk '{print $1}')  # macOS
-
-aws dynamodb put-item \
-  --table-name ai-platform-api-keys-production \
-  --item "{
-    \"key_hash\": {\"S\": \"$KEY_HASH\"},
-    \"caller_id\": {\"S\": \"app-001\"},
-    \"app_name\": {\"S\": \"my-first-app\"},
-    \"rpm_limit\": {\"N\": \"60\"},
-    \"rpd_limit\": {\"N\": \"5000\"},
-    \"active\": {\"BOOL\": true},
-    \"created_at\": {\"S\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}
-  }"
-
-echo "Your API key: $API_KEY"
+cp terraform.tfvars.example terraform.tfvars
 ```
 
-Remove the dev bypass from `authenticator.py`, rebuild the zip, and redeploy:
+Edit `terraform.tfvars` with the target region, environment, provider API keys, and alert email. Then run:
 
 ```bash
-aws lambda update-function-code \
-  --function-name ai-platform-gateway-production \
-  --zip-file fileb://ai-platform/dist/ai-platform.zip \
-  --architectures arm64
+terraform init -backend-config=backend.hcl
+terraform fmt -check -recursive
+terraform validate
+terraform plan
+terraform apply
 ```
 
-Verify rate limiting by sending 65+ requests in quick succession — you should see `429` after request 60.
+Review the plan before approving it. The apply can take several minutes because Aurora, ElastiCache, VPC endpoints, and provisioned Lambda concurrency must become ready.
 
----
+The pgvector migration runs automatically through the RDS Data API. No manual database commands are required.
 
-## Phase 5 — Monitoring
-
-**Goal:** Visibility into every request, token, and dollar.
+### Retrieve deployment values
 
 ```bash
-cd terraform && terraform apply -target=module.monitoring
+API_URL=$(terraform output -raw api_gateway_url)
+FUNCTION_NAME=$(terraform output -raw lambda_function_name)
+DASHBOARD_URL=$(terraform output -raw cloudwatch_dashboard_url)
+
+SECRET_ARN=$(terraform output -raw bootstrap_api_key_secret_arn)
+API_KEY=$(aws secretsmanager get-secret-value \
+  --secret-id "$SECRET_ARN" \
+  --query SecretString \
+  --output text)
 ```
 
-Confirm your SNS email subscription — click the confirmation link or alarms will not notify you.
+Terraform stores only a hash of the bootstrap API key in DynamoDB; the raw key is stored in Secrets Manager. Treat both Terraform state and the retrieved key as sensitive.
 
-View the dashboard:
-```bash
-terraform output cloudwatch_dashboard_url
-```
+Confirm the SNS subscription sent to the configured alert email, or CloudWatch alarms cannot deliver notifications.
 
-Verify custom metrics are flowing:
-```bash
-aws cloudwatch list-metrics --namespace "ai-platform/inference"
-# Expected: RequestCount, InputTokens, OutputTokens, LatencyMs, CacheHit, EstimatedCostUSD
-```
+## 3. Verify the deployment
 
-> **Known issue fixed in code:** CloudWatch `PutDashboard` returns HTTP 400 if any widget is missing a `"region"` field. Each widget in `terraform/modules/monitoring/main.tf` includes `"region": "${data.aws_region.current.name}"`.
-
----
-
-## Phase 6 — Semantic Cache
-
-**Goal:** Stop paying for duplicate LLM calls.
-
-Wire the Redis endpoint into the Lambda environment:
+Run this suite after the first apply and after infrastructure changes:
 
 ```bash
-REDIS_ENDPOINT=$(cd terraform && terraform output -raw redis_endpoint)
-FUNCTION_NAME=$(cd terraform && terraform output -raw lambda_function_name)
-
-aws lambda update-function-configuration \
-  --function-name "$FUNCTION_NAME" \
-  --environment "Variables={CACHE_ENABLED=true,REDIS_URL=rediss://$REDIS_ENDPOINT:6379}"
-```
-
-The Aurora DSN is read from `PG_SECRET_ARN` at runtime — no password is ever stored in an environment variable.
-
-Test the cache:
-```bash
-# First call — LLM is invoked (~900ms)
-curl -X POST $API_URL/v1/chat -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"messages": [{"role": "user", "content": "What is the capital of France?"}]}'
-
-# Second identical call — Redis exact hit (~140ms, "cache_hit": true)
-curl -X POST $API_URL/v1/chat -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"messages": [{"role": "user", "content": "What is the capital of France?"}]}'
-```
-
-> **Known issue fixed in code:** The caching module was passing the Lambda SG instead of the dedicated cache SG to ElastiCache and Aurora. The Lambda SG has no inbound rules on 6379/5432, causing Redis to hang silently at TLS handshake. Fixed in `terraform/modules/caching/main.tf` using `var.cache_sg_id`.
-
----
-
-## Phase 7 — Provider Health Checker
-
-**Goal:** Automatic circuit breaking when a provider is down.
-
-```bash
-cd terraform && terraform apply -target=module.health_checker
-```
-
-This creates a separate Lambda (`ai-platform-health-checker-production`) triggered by EventBridge every 5 minutes. It checks Bedrock Nova Micro, Anthropic Haiku, and OpenAI GPT-4o-mini, then writes results directly to the DynamoDB health table.
-
-**Key notes:**
-
-- **Nova Micro replaces Titan Lite:** `amazon.titan-text-lite-v1` is not available in all accounts. The platform uses `amazon.nova-micro-v1:0` (8x cheaper, Messages API format with `content: [{text: "..."}]` arrays). Handled in `bedrock_provider.py`.
-
-- **Health table writes:** `mark_failure()` uses DynamoDB `if_not_exists` on the `status` field — once set to "healthy" it never overwrites to "unhealthy". The health checker Lambda uses `put_item` directly to bypass this. `UNHEALTHY_THRESHOLD = 3` consecutive failures before a provider is marked down.
-
-Check which models are active in your account:
-```bash
-aws bedrock list-foundation-models \
-  --query "modelSummaries[?contains(modelId,'nova')].{id:modelId,status:modelLifecycle.status}"
-```
-
----
-
-## Phase 8 — CI/CD
-
-**Goal:** Every push to `main` automatically tests and deploys.
-
-The OIDC trust and IAM deploy role are managed by `terraform/modules/ci_cd/`:
-
-```bash
-cd terraform && terraform apply -target=module.ci_cd
-terraform output github_actions_role_arn
-```
-
-Store the role ARN as a GitHub secret (use stdin to avoid escaping issues):
-
-```bash
-echo -n "arn:aws:iam::YOUR_ACCOUNT_ID:role/ai-platform-github-actions" \
-  | gh secret set AWS_DEPLOY_ROLE_ARN
-```
-
-The workflow at `.github/workflows/deploy.yml` has two jobs:
-
-- **`test`** — runs on every push and PR; installs dependencies, runs `.venv/bin/python -m pytest tests/ -v --tb=short`
-- **`deploy`** — runs only on pushes to `main` after `test` passes; builds the arm64 zip using Docker + QEMU, deploys both Lambdas, smoke-tests `/health`
-
-> GitHub Actions runners are x86. QEMU (`docker/setup-qemu-action@v4`) is required to run `linux/arm64` containers on them. The workflow uses Node.js 24 action runtimes and forces JavaScript actions onto Node.js 24. Without QEMU, the Docker build can produce an x86 binary that fails with `exec format error` at Lambda runtime.
-
-> The IAM role is scoped to `repo:YOUR_ORG/YOUR_REPO:ref:refs/heads/main` — it cannot be assumed from any other branch or fork.
-
----
-
-## Phase 11 — Improvements
-
-**Goal:** Fix correctness bugs, eliminate code duplication, and add streaming + model pinning.
-
-### What changed
-
-**Bug fixes**
-
-- **SQL injection** — `semantic_cache.py` `write()` was interpolating `ttl_seconds` directly into SQL (`INTERVAL '{ttl_seconds} seconds'`). Replaced with a fully parameterised `$7` binding using a `datetime | None` value.
-
-- **Blocking event loop** — `SemanticCache._embed()` called the Bedrock SDK synchronously inside async methods, stalling the event loop on every cache lookup and write. Split into `_embed_sync()` + async `_embed()` that offloads via `run_in_executor`.
-
-- **Deprecated `asyncio.get_event_loop()`** — replaced with `asyncio.get_running_loop()` in `bedrock_provider.py`, `rate_limiter.py`, and `authenticator.py`. Also removed the stale `self._loop` stored at `__init__` time in `BedrockProvider` (a different event loop may be running at call time in Lambda).
-
-- **Health status `"degraded"` never returned** — `/health` only returned `"ok"` or `"unhealthy"`. Now returns `"degraded"` when some but not all providers are down, which is the common real-world failure mode.
-
-**Code quality**
-
-- **Duplicate `_fetch_secret`** — the function existed identically in both `gateway/app.py` and `health_checker.py`. Extracted to `ai_platform/utils.py` and both files import from there.
-
-- **Health checker log format** — logger calls used malformed f-string patterns (`logger.info(f'"event: {val}"', extra={})`) that produced double-quoted strings in CloudWatch. Fixed to `logger.info("event", extra={"key": val})`.
-
-**Config-driven behaviour**
-
-- **Hardcoded complexity thresholds** — `policies.py` `select_tier()` hardcoded `0.30` and `0.70`. Now reads `settings.complexity_low_threshold` and `settings.complexity_mid_threshold` so thresholds can be tuned via environment variables without code changes.
-
-**New features**
-
-- **`model_preference` routing** — `InferenceRequest.model_preference` was accepted but silently ignored. The router now attempts the named provider first (case-insensitive substring match on provider name or model ID) before falling back to the normal tier chain.
-
-- **Streaming SSE endpoint** — `POST /v1/chat/stream` returns `text/event-stream`. Each token is emitted as `data: <token>\n\n`. Cache hits are served as a single synthetic SSE event. Final event is always `data: [DONE]\n\n`.
-
-**Infrastructure**
-
-- Added `POST /v1/chat/stream` route to API Gateway (`terraform/modules/api_gateway/main.tf`).
-- Added `pg_secret_arn` field to `Settings` so the Lambda can resolve the Aurora DSN from the RDS-managed secret at cold start — no plaintext password in environment variables.
-
-### Rebuild and redeploy after changes
-
-```bash
-# 1. Rebuild the zip with updated source
-cd ai-platform
-cp -r ai_platform package/
-cd package && zip -r ../dist/ai-platform.zip . -q
-
-# 2. Push to Lambda
-aws lambda update-function-code \
-  --function-name ai-platform-gateway-production \
-  --zip-file fileb://dist/ai-platform.zip \
-  --architectures arm64
-
-# 3. Apply any Terraform changes (e.g. new API GW routes)
-cd ../terraform && terraform apply
-```
-
----
-
-## Phase 9 — Tests
-
-**Goal:** Catch routing and policy bugs before they reach production.
-
-```bash
-cd ai-platform
-.venv/bin/python -m pytest tests/ -v --tb=short
-```
-
-| File | Tests | Covers |
-|------|-------|--------|
-| `tests/test_policies.py` | 13 | `estimate_complexity()` scoring, `select_tier()` tier selection |
-| `tests/test_router.py` | 6 | End-to-end routing, provider fallback, exhausted-providers error, callback, stream-timeout fallback |
-| `tests/test_health.py` | 2 | Local circuit-breaker open/half-open/close behavior |
-| `tests/test_gateway.py` | 6 | `/health`, `/v1/chat`, `/v1/chat/stream` endpoint behavior and cache/auth flows |
-
-All 27 tests run in under a few seconds with no external provider calls — dependencies are mocked for deterministic behavior. Tests run automatically in CI on every push and PR.
-
-> When using `pytest.raises(RuntimeError, match=...)`, match on `"All providers exhausted"` — that is the actual error message raised by the router.
-
-### Live AWS Validation (May 27, 2026)
-
-Terraform apply completed successfully and provisioned all platform resources for production in `us-east-1`.
-
-Retrieve current deployment values:
-
-```bash
-cd terraform
-terraform output -raw api_gateway_url
-terraform output -raw lambda_function_name
-terraform output -raw cloudwatch_dashboard_url
-```
-
-Validated behaviors against the live deployment:
-
-- `/health` returns `200` and healthy provider map.
-- Auth enforcement returns `401` for missing/invalid tokens.
-- Authenticated inference returns `200`.
-- Rate limiting returns `429` after configured RPM threshold.
-- Streaming endpoint returns SSE and terminates with `[DONE]`.
-- Routing preference honors pinned model/provider selection.
-- Temporary smoke-test keys were revoked after validation.
-
----
-
-## Phase 10 — Production Hardening
-
-**Goal:** Tighten security and reliability for real traffic.
-
-### WAF
-
-> **Known limitation:** WAFv2 `AssociateWebACL` does **not** support API Gateway v2 HTTP APIs. Supported targets are REST API (v1), ALB, CloudFront, AppSync, and Cognito. This platform uses API Gateway v2 (70% cheaper) — WAF cannot be directly attached.
-
-> **Current protection:** API Gateway throttling (200 rps sustained / 500 burst) + DynamoDB API key auth + sliding-window rate limiting covers the primary attack surface.
-
-> **To add WAF later:** Place CloudFront in front of the API Gateway and attach a WAF Web ACL at `scope = "CLOUDFRONT"`. This also adds a global CDN layer.
-
-> **Additional debugging note:** `aws_apigatewayv2_stage.arn` outputs an ARN with an empty account ID field (`arn:aws:apigateway:region::/apis/...`). If you ever need the stage ARN with account ID, construct it explicitly:
-> ```
-> arn:aws:apigateway:${region}:${account_id}:/apis/${api_id}/stages/${stage_name}
-> ```
-
-### Provisioned Concurrency
-
-Eliminates cold starts for the gateway Lambda:
-
-```hcl
-resource "aws_lambda_provisioned_concurrency_config" "gateway" {
-  function_name                      = aws_lambda_function.gateway.function_name
-  qualifier                          = aws_lambda_alias.live.name
-  provisioned_concurrent_executions  = 2
-}
-```
-
-### Final Production Checklist
-
-- [ ] WAF — add CloudFront layer if external-facing WAF is required (API GW v2 does not support WAFv2 directly)
-- [ ] `deletion_protection = true` on Aurora cluster
-- [x] S3 Terraform state bucket has versioning enabled
-- [x] Runtime secrets are in Secrets Manager, not Lambda environment variables
-- [ ] CloudWatch alarms active and SNS email confirmed
-- [ ] At least 2 API keys exist for different applications
-- [ ] Cache hit rate > 20% after 24 hours of traffic
-- [ ] Load test: `ab -n 1000 -c 10 -H "Authorization: Bearer $API_KEY" $API_URL/health`
-
----
-
-## Quick Reference
-
-### Useful commands
-
-```bash
-# Get the live API URL
-cd terraform && terraform output api_gateway_url
-
-# View Lambda logs live
-FUNCTION_NAME=$(cd terraform && terraform output -raw lambda_function_name)
-aws logs tail /aws/lambda/$FUNCTION_NAME --follow
-
-# Force redeploy without Terraform
-aws lambda update-function-code \
-  --function-name "$FUNCTION_NAME" \
-  --zip-file fileb://ai-platform/dist/ai-platform.zip \
-  --architectures arm64
-
-# Run tests with the project virtual environment
-cd ../ai-platform
-.venv/bin/python -m pytest tests/ -v --tb=short
-
-# Check cache hit rate (last hour)
-START=$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)   # macOS
-# START=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)  # Linux
-aws cloudwatch get-metric-statistics \
-  --namespace ai-platform/inference --metric-name CacheHit \
-  --start-time "$START" --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --period 3600 --statistics Sum
-
-# Revoke an API key
-aws dynamodb update-item \
-  --table-name ai-platform-api-keys-production \
-  --key '{"key_hash": {"S": "<hash>"}}' \
-  --update-expression "SET active = :false" \
-  --expression-attribute-values '{":false": {"BOOL": false}}'
-
-# Destroy all infrastructure
-cd terraform && terraform destroy
-```
-
-### Canonical post-deploy smoke test
-
-```bash
-# Resolve current environment outputs
-API_URL=$(cd terraform && terraform output -raw api_gateway_url)
-FUNCTION_NAME=$(cd terraform && terraform output -raw lambda_function_name)
-
-# Health check
+# Health should return HTTP 200.
 curl -sS "$API_URL/health"
 
-# Unauthorized check (expect 401)
+# Missing authentication should return 401.
 curl -sS -o /dev/null -w "%{http_code}\n" \
   -X POST "$API_URL/v1/chat" \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"hello"}]}'
 
-# Authorized check (expect 200; API_KEY must be set)
+# A valid key should return 200.
 curl -sS -o /dev/null -w "%{http_code}\n" \
   -X POST "$API_URL/v1/chat" \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"Return one word: healthy"}]}'
 
-# Streaming check (expect SSE tokens ending in [DONE])
+# Streaming should emit SSE events and finish with data: [DONE].
 curl -N -X POST "$API_URL/v1/chat/stream" \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
   -d '{"messages":[{"role":"user","content":"Stream a short greeting."}]}'
 
-# Logs check for deploy window
+# Review the deployment window for unexpected errors.
 aws logs tail "/aws/lambda/$FUNCTION_NAME" --since 10m
 ```
 
-### Deployment handoff checklist
+To verify exact caching, send the same authenticated `/v1/chat` request twice. The second response should report `"cache_hit": true` after the first response has been persisted.
 
-- [ ] `terraform apply` succeeded with expected resources.
-- [ ] Smoke suite passed (`/health`, auth, `/v1/chat`, `/v1/chat/stream`).
-- [ ] Dashboard URL retrieved from `terraform output -raw cloudwatch_dashboard_url`.
-- [ ] Lambda logs for the last 10 minutes show no unexpected errors.
-- [ ] Any temporary test API keys were revoked after validation.
+Deployment is ready when:
 
-### Streaming endpoint
+- Tests, linting, type checks, and Terraform validation pass.
+- `/health` returns `200` and providers are not all unhealthy.
+- Authentication returns `401` without a key and `200` with the bootstrap key.
+- Streaming terminates with `[DONE]`.
+- The CloudWatch dashboard opens and recent Lambda logs show no unexpected errors.
+- The SNS email subscription is confirmed.
+
+## 4. Routine deployments and access
+
+### CI/CD
+
+Pushes and pull requests run tests and Terraform validation. A push to `main` builds the arm64 package and deploys both Lambdas through GitHub Actions.
+
+Before relying on CI, store the deployment role ARN as the repository secret `AWS_DEPLOY_ROLE_ARN`:
 
 ```bash
-# Tokens arrive as SSE events; [DONE] signals completion
-curl -N -X POST $API_URL/v1/chat/stream \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -H "Accept: text/event-stream" \
-  -d '{"messages": [{"role": "user", "content": "Explain recursion briefly."}], "metadata": {"budget": "low"}}'
-
-# Expected output format:
-# data: Recursion is...
-# data:  a function...
-# data: [DONE]
+aws iam get-role \
+  --role-name ai-platform-github-actions \
+  --query Role.Arn \
+  --output text | gh secret set AWS_DEPLOY_ROLE_ARN
 ```
 
-### Model preference pinning
+The OIDC role is restricted to this repository's `main` branch and does not require long-lived AWS credentials.
 
-Force a specific provider regardless of complexity score:
+### Manual Lambda code update
 
-```bash
-curl -X POST $API_URL/v1/chat \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [{"role": "user", "content": "Hello"}],
-    "model_preference": "sonnet"
-  }'
-# Routes to anthropic-sonnet. Falls back to normal tier routing if unavailable.
-# Match is case-insensitive substring on provider name OR model ID.
-```
-
-### Tuning routing thresholds without code changes
+Prefer CI for production. If a manual update is necessary, rebuild the arm64 zip using the command in section 2, then update both functions:
 
 ```bash
-# Override complexity thresholds via Lambda environment variables
-aws lambda update-function-configuration \
+aws lambda update-function-code \
   --function-name ai-platform-gateway-production \
-  --environment "Variables={COMPLEXITY_LOW_THRESHOLD=0.25,COMPLEXITY_MID_THRESHOLD=0.65}"
+  --zip-file fileb://ai-platform/dist/ai-platform.zip \
+  --architectures arm64
+
+aws lambda wait function-updated \
+  --function-name ai-platform-gateway-production
+
+aws lambda update-function-code \
+  --function-name ai-platform-health-checker-production \
+  --zip-file fileb://ai-platform/dist/ai-platform.zip \
+  --architectures arm64
 ```
 
-### Adding a new LLM provider
+The CI workflow additionally publishes a gateway version, moves the `live` alias, and waits for provisioned concurrency. Use CI whenever those production guarantees matter.
 
-1. Create `ai-platform/ai_platform/providers/new_provider.py` implementing `BaseProvider`
-2. Add a config function returning `ProviderConfig` with the correct tier and cost
-3. Import and instantiate in `gateway/app.py` lifespan
-4. Add to the appropriate tier list in `providers_by_tier`
-5. If the provider needs an API key, add a secret ARN field to `Settings` and resolve it in the lifespan the same way `anthropic_key` and `openai_key` are resolved
+### Additional API keys
 
-No other files need to change.
+Create separate API keys for separate applications. Store only a SHA-256 hash in the API-keys table and deliver the raw key through an approved secret-management channel. Each record needs:
+
+- `key_hash`
+- `caller_id`
+- `app_name`
+- `rpm_limit`
+- `rpd_limit`
+- `active`
+- `created_at`
+
+To revoke a key, set its `active` attribute to `false`; do not delete audit or usage records.
+
+## 5. Operations and troubleshooting
+
+### Useful commands
+
+```bash
+cd terraform
+terraform output -raw api_gateway_url
+terraform output -raw lambda_function_name
+terraform output -raw cloudwatch_dashboard_url
+
+aws logs tail "/aws/lambda/$(terraform output -raw lambda_function_name)" --follow
+aws cloudwatch list-metrics --namespace ai-platform/inference
+```
+
+The primary custom metrics are `RequestCount`, `InputTokens`, `OutputTokens`, `LatencyMs`, `CacheHit`, `EstimatedCostUSD`, and `ErrorCount`.
+
+### Common failures
+
+**Lambda times out while loading secrets**
+
+Secrets Manager uses an interface VPC endpoint. Confirm its security group permits inbound HTTPS from the VPC/Lambda security group. The expected rule is managed in `terraform/modules/networking/main.tf`.
+
+**Redis or PostgreSQL connections hang**
+
+Confirm ElastiCache and Aurora use the dedicated cache security group and permit Lambda traffic on ports `6379` and `5432`. The expected configuration is in `terraform/modules/caching/main.tf`.
+
+**Lambda reports incompatible binaries or `exec format error`**
+
+Rebuild the package inside the `python:3.12-arm64` Lambda image. Do not package native dependencies installed directly on macOS or x86 Linux.
+
+**A provider becomes unavailable**
+
+The scheduled health checker updates the provider-health table every five minutes, and the router falls back to another healthy provider. Check health-checker Lambda logs and confirm Bedrock model access and provider secrets before changing routing code.
+
+**WAF cannot be associated with the API**
+
+This project uses API Gateway v2 HTTP APIs, which cannot be directly associated with WAFv2. If WAF is required, place CloudFront in front of API Gateway and attach a CloudFront-scoped Web ACL.
+
+### Production checklist
+
+- [ ] Aurora deletion protection is enabled for long-lived production data.
+- [ ] The Terraform state bucket is private, encrypted, and versioned.
+- [ ] Runtime secrets are stored in Secrets Manager.
+- [ ] SNS alarm subscriptions are confirmed.
+- [ ] Each consuming application has its own API key and limits.
+- [ ] Cache hit rate and cost metrics are reviewed after real traffic begins.
+- [ ] Load and recovery testing has been completed for the expected traffic level.
+- [ ] CloudFront and WAF are added if the external threat model requires them.
+
+Infrastructure removal is intentionally not included as a quick-reference command. Before destroying an environment, review data retention, deletion protection, Secrets Manager behavior, and the exact Terraform workspace and plan.
 
 ---
 
-## Coding conventions
-
-These conventions were established through fixes made to the codebase. Follow them to avoid reintroducing the same classes of bugs.
-
-**Async I/O**
-
-- Never call blocking SDK methods (boto3, asyncpg, Redis) directly inside `async def`. Always wrap in `run_in_executor`.
-- Use `asyncio.get_running_loop()` inside async functions. Never use `asyncio.get_event_loop()` — it is deprecated in Python 3.10+ when called from a running loop.
-- Never store `self._loop = asyncio.get_event_loop()` in `__init__`. The event loop at `__init__` time may differ from the loop at call time in Lambda.
-
-```python
-# Wrong
-result = self._boto3_client.invoke_model(...)  # blocks event loop
-
-# Right
-loop = asyncio.get_running_loop()
-result = await loop.run_in_executor(None, self._invoke_sync, args)
-```
-
-**Parameterised SQL**
-
-- Never interpolate variables into SQL strings. Always use asyncpg positional parameters (`$1`, `$2`, ...).
-
-```python
-# Wrong — SQL injection risk
-await pg.execute(f"... expires_at = NOW() + INTERVAL '{ttl} seconds'")
-
-# Right
-expires_at = datetime.utcnow() + timedelta(seconds=ttl) if ttl else None
-await pg.execute("... expires_at = $7", ..., expires_at)
-```
-
-**Shared utilities**
-
-- If a helper is used in more than one module, put it in `ai_platform/utils.py`. Do not duplicate it.
-
-**Logging**
-
-- Use structured logging: `logger.info("event_name", extra={"key": value})`.
-- Never embed values directly in the message string with f-strings — it breaks CloudWatch Logs Insights queries.
-
-```python
-# Wrong
-logger.info(f'"provider_healthy: {name} latency={ms}ms"')
-
-# Right
-logger.info("provider_healthy", extra={"provider": name, "latency_ms": ms})
-```
-
-**Settings and config**
-
-- Every tunable value belongs in `Settings` (`config/settings.py`) as a typed field with a sensible default. Never hardcode thresholds, timeouts, or table names in business logic.
-- `get_settings()` is `@lru_cache` — it is called once per cold start. To inject values at startup (e.g. a DSN resolved from a secret), set `os.environ["FIELD_NAME"]` before the first call, or pass the value explicitly to the consuming class.
-
----
-
-*Last updated: 2026-07-20 — hardened Terraform apply complete, 68 tests, AWS smoke/reliability suite validated.*
+*Last updated: 2026-07-21*

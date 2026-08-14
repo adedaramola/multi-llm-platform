@@ -1,0 +1,17 @@
+services:
+  api:
+    build:
+      context: ./ai-platform
+      dockerfile: Dockerfile
+    image: multi-llm-platform:local
+    env_file:
+      - path: ./ai-platform/.env
+        required: false
+    environment:
+      ENVIRONMENT: dev
+      CACHE_ENABLED: "false"
+      LOG_LEVEL: INFO
+    ports:
+      - "${API_PORT:-8080}:8080"
+    init: true
+    restart: unless-stopped

@@ -31,8 +31,13 @@ class RateLimiter:
             settings.rate_limit_table
         )
         self._fail_open = settings.rate_limit_fail_open
+        self._is_dev = settings.environment == "dev"
 
     async def check_and_increment(self, caller: CallerIdentity) -> None:
+        # Dev bypass — no DynamoDB required locally
+        if self._is_dev:
+            return
+
         now = int(time.time())
         minute_bucket = now // 60
         day_bucket = now // 86400

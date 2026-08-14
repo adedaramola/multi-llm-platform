@@ -1,174 +1,188 @@
 # Multi-LLM Platform
 
-A production-grade AI gateway that routes requests across multiple LLM providers (Anthropic Claude, OpenAI, AWS Bedrock) with cost-aware routing, two-layer semantic caching, DynamoDB-backed auth, and full observability — deployed on AWS Lambda via Terraform.
+A serverless AI gateway that routes requests across AWS Bedrock, Anthropic, and OpenAI. It combines cost-aware model selection, exact and semantic caching, API-key controls, usage accounting, and AWS observability behind one API.
 
----
+The platform is designed for a small engineering team that needs production infrastructure without operating Kubernetes.
 
-## Table of Contents
+## What it provides
 
-- [Architecture](#architecture)
-- [Features](#features)
-- [Project Structure](#project-structure)
-- [API Reference](#api-reference)
-- [Local Development](#local-development)
-- [Configuration](#configuration)
-- [Deployment](#deployment)
-- [Observability](#observability)
-- [Roadmap](#roadmap)
+- Cost-aware routing based on prompt complexity, budget, and reasoning requirements
+- Optional model or provider preference with automatic fallback
+- AWS Bedrock, Anthropic, and OpenAI provider support
+- Redis exact-match caching and Aurora pgvector semantic caching
+- Synchronous and Server-Sent Events streaming responses
+- DynamoDB API-key authentication and per-client RPM/RPD limits
+- Per-client token, request, cache-hit, and estimated-cost accounting
+- Scheduled provider health checks and circuit breaking
+- CloudWatch metrics, alarms, dashboards, logs, and active X-Ray tracing
+- Modular Terraform and GitHub Actions deployment through AWS OIDC
 
----
+## How it works
 
-## Architecture
+```text
+Client
+  │
+  ▼
+API Gateway HTTP API
+  │
+  ▼
+Lambda · FastAPI + Mangum
+  ├── API-key authentication and rate limiting · DynamoDB
+  ├── Exact cache · Redis
+  ├── Semantic cache · Aurora PostgreSQL + pgvector
+  ├── Cost-aware router
+  │     ├── AWS Bedrock
+  │     ├── Anthropic
+  │     └── OpenAI
+  └── Usage and operational metrics · DynamoDB + CloudWatch
 
-```
-Client → API Gateway (HTTP v2) → Lambda (FastAPI/Mangum)
-                                       │
-                          ┌────────────┼────────────┐
-                          ▼            ▼             ▼
-                       Auth       Rate Limit     Validator
-                     (DynamoDB)  (DynamoDB)    (Pydantic)
-                          │
-                    Cache Lookup
-                   Redis (exact) → pgvector (semantic)
-                          │ MISS
-                    Cost-Aware Router
-                    ┌─────┼─────────┐
-                    ▼     ▼         ▼
-                 Bedrock Anthropic  OpenAI
-                    └─────┴─────────┘
-                          │
-                  Cache Write + Metrics
-                  (CloudWatch EMF / X-Ray)
+EventBridge → Health-checker Lambda → Provider health table
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design, routing pseudocode, cost model, and operational risk register.
+Requests check the exact and semantic caches before reaching the router. On a cache miss, the router chooses an eligible model tier, skips unhealthy providers, and falls back when a provider fails. Successful responses update usage, metrics, and the cache.
 
----
+See [ARCHITECTURE.md](ARCHITECTURE.md) for routing details, infrastructure design, the cache schema, cost assumptions, and operational risks.
 
-## Features
+## Quick start
 
-- **Cost-aware routing** — scores request complexity (token count, code detection, reasoning keywords) and routes to the cheapest model tier that can handle it. Falls back through tiers when providers are unhealthy.
-- **Model preference** — clients can pin a specific model; the router falls back to complexity-based routing only if that provider is unavailable.
-- **Two-layer cache** — Redis exact-match (sub-millisecond) and pgvector semantic similarity (cosine threshold 0.92). Cache writes are fire-and-forget (non-blocking).
-- **Streaming** — SSE streaming endpoint (`POST /v1/chat/stream`) with cache hits served as a single synthetic event.
-- **DynamoDB auth** — API key validation with per-key rate limits (requests per minute + per day). Dev bypass available locally.
-- **Provider health registry** — DynamoDB-backed health state, refreshed by an EventBridge Lambda every 5 minutes. Unhealthy providers are skipped during routing.
-- **CloudWatch EMF metrics** — `RequestCount`, `InputTokens`, `OutputTokens`, `LatencyMs`, `CacheHit`, `EstimatedCostUSD`, `ErrorCount` emitted via stdout without a CloudWatch agent.
-- **X-Ray tracing** — segments for auth, cache lookup, routing, provider call, and cache write.
-- **Terraform IaC** — all infrastructure in modular Terraform; OIDC-based GitHub Actions deploy role (no long-lived credentials).
+### Requirements
 
----
+- Python 3.12
+- AWS credentials for Bedrock
+- Anthropic and OpenAI API keys
+- Docker, if you prefer the container workflow
 
-## Project Structure
+### Run locally
 
-```
-.
-├── ARCHITECTURE.md         # Full design: routing logic, cache schema, cost model, risk register
-├── IMPLEMENTATION_GUIDE.md # Step-by-step build log, gotchas, coding conventions, runbooks
-├── ai-platform/            # Python service (FastAPI + Mangum)
-│   ├── ai_platform/        # gateway, router, providers, cache, auth, metrics, config
-│   └── tests/
-└── terraform/              # IaC — networking, auth, caching, lambda, API GW, monitoring, CI/CD
+```bash
+cp ai-platform/.env.example ai-platform/.env
 ```
 
-See [ARCHITECTURE.md §7–8](ARCHITECTURE.md#7-service-implementation-structure) for the full annotated file tree.
+Set the provider keys in `ai-platform/.env` and keep local caching disabled unless Redis and PostgreSQL are available:
 
----
+```dotenv
+ENVIRONMENT=dev
+CACHE_ENABLED=false
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+```
 
-## API Reference
+Then install and start the service:
 
-All endpoints require `Authorization: Bearer <api_key>`.
+```bash
+cd ai-platform
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+uvicorn ai_platform.gateway.app:app --reload --port 8080
+```
 
-### `POST /v1/chat`
+In development, any non-empty bearer token is accepted:
 
-Synchronous chat completion.
+```bash
+curl -X POST http://localhost:8080/v1/chat \
+  -H "Authorization: Bearer dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Explain semantic caching briefly."}]}'
+```
 
-**Request**
+To run with Docker Compose instead (an `.env` file is optional for the public health endpoint):
+
+```bash
+docker compose up --build
+curl http://localhost:8080/health
+```
+
+Compose reads provider credentials from `ai-platform/.env`, exposes the API on port 8080, and disables
+caching by default so Redis and PostgreSQL are not required. Set `API_PORT` to change the host port, for
+example `API_PORT=9000 docker compose up --build`. Stop the service with `docker compose down`.
+
+To build and run the image directly:
+
+```bash
+docker build -t multi-llm-platform ./ai-platform
+docker run --rm --env-file ai-platform/.env -e ENVIRONMENT=dev -e CACHE_ENABLED=false \
+  -p 8080:8080 multi-llm-platform
+```
+
+## API
+
+All `/v1` endpoints require `Authorization: Bearer <api-key>`. The `/health` endpoint is public.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/chat` | Return a complete chat response |
+| `POST` | `/v1/chat/stream` | Stream a response as SSE events |
+| `GET` | `/v1/usage` | Return the caller's current-month usage |
+| `GET` | `/health` | Report platform and provider health |
+
+### Chat request
 
 ```json
 {
   "messages": [
-    { "role": "system", "content": "You are a helpful assistant." },
-    { "role": "user", "content": "Explain async/await in Python." }
+    {"role": "system", "content": "You are a concise assistant."},
+    {"role": "user", "content": "Explain async/await in Python."}
   ],
-  "model_preference": "claude-sonnet-4-6",
+  "model_preference": "sonnet",
   "max_tokens": 1024,
   "temperature": 0.7,
   "metadata": {
     "budget": "standard",
     "latency_sla_ms": 5000,
     "reasoning_required": false,
-    "caller_app": "my-service"
+    "caller_app": "example-service"
   }
 }
 ```
 
-| Field | Type | Default | Notes |
-|---|---|---|---|
-| `messages` | `Message[]` | required | 1–50 messages; roles: `system`, `user`, `assistant` |
-| `model_preference` | `string` | `null` | Case-insensitive model name/ID. Router falls back if unavailable. |
-| `max_tokens` | `int` | `1024` | 1–32768 |
-| `temperature` | `float` | `0.7` | 0.0–2.0 |
-| `metadata.budget` | `"low"` \| `"standard"` \| `"high"` | `"standard"` | `low` forces low-tier; `high` allows mid/high-tier |
-| `metadata.latency_sla_ms` | `int` | `5000` | Provider call timeout in ms (500–60000) |
-| `metadata.reasoning_required` | `bool` | `false` | Nudges routing toward higher-capability models |
+`messages` accepts 1–50 `system`, `user`, or `assistant` messages. `model_preference` is optional and matches a provider name or model ID; normal tier routing is used if the preferred model is unavailable. Budget values are `low`, `standard`, and `high`.
 
-**Response**
+### Chat response
 
 ```json
 {
   "request_id": "a1b2c3d4-...",
   "model_used": "claude-sonnet-4-6-20251001",
   "provider": "anthropic",
-  "content": "Async/await in Python...",
+  "content": "Async/await lets Python...",
   "usage": {
     "input_tokens": 42,
-    "output_tokens": 310,
-    "total_tokens": 352,
-    "estimated_cost_usd": 0.002112
+    "output_tokens": 120,
+    "total_tokens": 162,
+    "estimated_cost_usd": 0.0012
   },
   "cache_hit": false,
   "cache_source": "none",
-  "latency_ms": 1840,
-  "timestamp": 1746662400.0
+  "latency_ms": 940,
+  "timestamp": 1784600000.0
 }
 ```
 
-**Error responses**
+`cache_source` is `none`, `exact`, or `semantic`.
 
-| Status | Code | Meaning |
-|---|---|---|
-| `401` | `unauthorized` | Missing or invalid API key |
-| `422` | — | Request body validation failed |
-| `429` | `rate_limit_exceeded` | Per-minute or per-day quota hit |
-| `503` | `provider_unavailable` | All providers failed after retries |
+### Streaming
 
----
+`POST /v1/chat/stream` accepts the same request body and returns `text/event-stream`:
 
-### `POST /v1/chat/stream`
+```text
+data: First response chunk
 
-Streaming chat completion via Server-Sent Events.
+data: Next response chunk
 
-Same request body as `/v1/chat`. Response is a stream of:
+data: [DONE]
 
 ```
-data: <token>\n\n
-data: <token>\n\n
-...
-data: [DONE]\n\n
-```
 
-Cache hits are served as a single synthetic SSE event followed by `[DONE]`. Errors emit `data: [ERROR] All providers failed\n\n`; a provider failure after chunks were already delivered emits `data: [ERROR] Stream interrupted\n\n` (partial output is never cached).
+Cache hits are returned as one synthetic data event followed by `[DONE]`. If streaming fails, the endpoint emits an `[ERROR]` event; partial output is not cached.
 
----
+### Usage
 
-### `GET /v1/usage`
-
-Current-month usage and estimated spend for the calling API key.
+`GET /v1/usage` returns the authenticated caller's current UTC month totals:
 
 ```json
 {
-  "caller_id": "caller_123",
+  "caller_id": "app-001",
   "month": "2026-07",
   "request_count": 42,
   "cache_hits": 10,
@@ -178,275 +192,84 @@ Current-month usage and estimated spend for the calling API key.
 }
 ```
 
-Backed by a DynamoDB table (`ai-platform-usage`) with one atomically-incremented daily bucket per caller. Streaming requests are billed with real token counts reported by the provider at stream end.
+### Errors
 
----
+| Status | Meaning |
+|---|---|
+| `401` | Missing, invalid, or revoked API key |
+| `422` | Invalid request body |
+| `429` | Per-minute or per-day quota exceeded |
+| `503` | Authentication dependency unavailable or all providers failed |
 
-### `GET /health`
+## Development checks
 
-Returns platform health. No auth required.
-
-```json
-{
-  "status": "ok",
-  "providers": {
-    "bedrock-nova-micro": true,
-    "bedrock-claude-haiku": true,
-    "anthropic-claude-haiku": true,
-    "anthropic-claude-sonnet": true,
-    "anthropic-claude-opus": true,
-    "openai-gpt4o-mini": true,
-    "openai-gpt4o": true
-  },
-  "cache_available": true,
-  "timestamp": 1746662400.0
-}
-```
-
-`status` is `"ok"` (all providers healthy), `"degraded"` (some unhealthy), or `"unhealthy"` (none healthy).
-
----
-
-## Local Development
-
-**Prerequisites:** Docker, Python 3.12+, AWS credentials (for Bedrock).
-
-### 1. Copy and fill in environment variables
-
-```bash
-cp ai-platform/.env.example ai-platform/.env
-```
-
-Minimum required in `.env`:
-
-```
-ENVIRONMENT=dev
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-# Leave REDIS_URL and PG_DSN blank to disable caching locally
-CACHE_ENABLED=false
-```
-
-### 2. Run with Docker
+Run the same checks used by CI:
 
 ```bash
 cd ai-platform
-docker build -t ai-platform .
-docker run --env-file .env -p 8080:8080 ai-platform
-```
-
-### 3. Set up a local virtual environment
-
-```bash
-cd ai-platform
-python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+ruff check ai_platform tests
+mypy
+python -m pytest tests/ -v --tb=short
+
+cd ../terraform
+terraform fmt -check -recursive
+terraform init -backend=false -input=false
+terraform validate
 ```
-
-### 4. Or run directly
-
-```bash
-cd ai-platform
-uvicorn ai_platform.gateway.app:app --reload --port 8080
-```
-
-### 5. Make a request
-
-```bash
-curl -X POST http://localhost:8080/v1/chat \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer dev-key" \
-  -d '{
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-```
-
-> In `dev` environment the auth layer accepts any bearer key.
-
-### 6. Run tests
-
-```bash
-cd ai-platform
-.venv/bin/python -m pytest tests/ -v --tb=short
-```
-
----
-
-## Configuration
-
-All configuration is via environment variables (or a `.env` file). Loaded once at Lambda cold start.
-
-| Variable | Default | Description |
-|---|---|---|
-| `ENVIRONMENT` | `production` | `dev` enables auth bypass and debug logging |
-| `LOG_LEVEL` | `INFO` | Python log level |
-| `AWS_REGION` | `us-east-1` | AWS region |
-| `ANTHROPIC_API_KEY` | `""` | Anthropic API key (or use `ANTHROPIC_SECRET_ARN`) |
-| `ANTHROPIC_SECRET_ARN` | `""` | Secrets Manager ARN — takes precedence if key not set directly |
-| `OPENAI_API_KEY` | `""` | OpenAI API key (or use `OPENAI_SECRET_ARN`) |
-| `OPENAI_SECRET_ARN` | `""` | Secrets Manager ARN for OpenAI key |
-| `BEDROCK_REGION` | `us-east-1` | AWS region for Bedrock calls |
-| `REDIS_URL` | `""` | ElastiCache Serverless endpoint |
-| `REDIS_TTL_SECONDS` | `3600` | Default Redis TTL |
-| `PG_DSN` | `""` | Aurora pgvector DSN (or use `PG_SECRET_ARN`) |
-| `PG_SECRET_ARN` | `""` | RDS-managed secret ARN — DSN resolved at cold start |
-| `PG_HOST` | `""` | Aurora cluster endpoint used with the RDS-managed credentials |
-| `PG_PORT` | `5432` | PostgreSQL port |
-| `PG_DATABASE` | `ai_platform` | PostgreSQL database name |
-| `SEMANTIC_CACHE_THRESHOLD` | `0.92` | Cosine similarity threshold for cache hits |
-| `CACHE_ENABLED` | `true` | Set to `false` to disable all caching |
-| `CACHE_WRITE_TIMEOUT_MS` | `750` | Upper bound for inline cache persistence before the response continues |
-| `API_KEYS_TABLE` | `ai-platform-api-keys` | DynamoDB table for API key validation |
-| `RATE_LIMIT_TABLE` | `ai-platform-rate-limits` | DynamoDB table for rate limit counters |
-| `HEALTH_TABLE` | `ai-platform-provider-health` | DynamoDB table for provider health state |
-| `DEFAULT_RPM` | `60` | Default requests per minute (overridden per key) |
-| `DEFAULT_RPD` | `5000` | Default requests per day (overridden per key) |
-| `RATE_LIMIT_FAIL_OPEN` | `false` | Allow requests when DynamoDB rate limiting fails; keep `false` in production |
-| `COMPLEXITY_LOW_THRESHOLD` | `0.3` | Complexity score below which low-tier is used |
-| `COMPLEXITY_MID_THRESHOLD` | `0.7` | Complexity score below which mid-tier is used |
-| `MAX_PROVIDER_RETRIES` | `2` | Retries per provider before marking unhealthy |
-| `PROVIDER_TIMEOUT_SECONDS` | `30` | Hard timeout per provider call |
-| `CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `3` | Consecutive failures before a provider is locally opened |
-| `CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `60` | Cooldown before a locally opened provider is retried |
-| `EMBEDDING_MODEL` | `amazon.titan-embed-text-v1` | Bedrock embedding model for semantic cache |
-
----
 
 ## Deployment
 
-Infrastructure is managed with Terraform. GitHub Actions validates Terraform
-on every change and deploys Lambda code from `main` through an OIDC-federated
-IAM role (no long-lived AWS credentials).
+AWS infrastructure is managed entirely with Terraform. A full deployment creates:
 
-### First-time setup
+- VPC networking and private service access
+- DynamoDB auth, rate-limit, provider-health, and usage tables
+- Secrets Manager provider and bootstrap-client secrets
+- ElastiCache Serverless and Aurora Serverless with pgvector
+- Gateway and scheduled health-checker Lambdas
+- API Gateway routes, CloudWatch monitoring, and SNS alerts
+- GitHub Actions OIDC provider and least-privilege deployment role
 
-```bash
-cd terraform
+Follow [IMPLEMENTATION_GUIDE.md](IMPLEMENTATION_GUIDE.md) for the supported first deployment, verification suite, CI setup, routine updates, and troubleshooting. The first deployment requires a `linux/arm64` Lambda package before `terraform apply`.
 
-# Create or harden the private, encrypted, versioned state bucket
-STATE_BUCKET="ai-platform-tfstate-<your-aws-account-id>" \
-  AWS_REGION_NAME="us-east-1" ./scripts/bootstrap_backend.sh
+## Configuration
 
-# Copy and edit your tfvars
-cp terraform.tfvars.example terraform.tfvars
+Runtime settings are defined in [`ai-platform/ai_platform/config/settings.py`](ai-platform/ai_platform/config/settings.py) and can be supplied through environment variables. Start from [`ai-platform/.env.example`](ai-platform/.env.example) for local development and [`terraform/terraform.tfvars.example`](terraform/terraform.tfvars.example) for AWS.
 
-# Initialise with S3 backend
-terraform init -backend-config=backend.hcl
+Important groups include:
 
-# Review and apply
-terraform plan
-terraform apply
+- Provider keys and Secrets Manager ARNs
+- Redis and PostgreSQL connections
+- Cache TTL and semantic-similarity threshold
+- DynamoDB table names and rate-limit behavior
+- Complexity thresholds, provider retries, and timeouts
+- Circuit-breaker thresholds and cooldowns
+
+Settings are loaded once per Lambda cold start. Production provider credentials are resolved from Secrets Manager rather than stored as plaintext Lambda environment variables.
+
+## Repository layout
+
+```text
+.
+├── README.md                  Project overview and local quick start
+├── IMPLEMENTATION_GUIDE.md   Deployment, verification, and operations
+├── ARCHITECTURE.md            Detailed technical design
+├── ai-platform/
+│   ├── README.md               Python development and extension guide
+│   ├── ai_platform/           Gateway, routing, providers, auth, cache, and metrics
+│   └── tests/                 Unit and integration-style tests with mocked dependencies
+└── terraform/
+    ├── README.md               Infrastructure workflow and safety guide
+    ├── modules/               AWS infrastructure modules
+    └── scripts/               Backend bootstrap and pgvector migration
 ```
 
-`terraform apply` is self-bootstrapping: it creates the pgvector extension and
-semantic-cache schema, generates an initial client API key, stores only its hash
-in DynamoDB, and places the raw key in Secrets Manager. Retrieve it with:
+## Documentation
 
-```bash
-SECRET_ARN=$(terraform output -raw bootstrap_api_key_secret_arn)
-aws secretsmanager get-secret-value \
-  --secret-id "$SECRET_ARN" \
-  --query SecretString --output text
-```
-
-Provider secrets keep stable names and use immediate deletion during an explicit
-Terraform destroy; the generated bootstrap secret uses a unique name. A destroy
-followed by an immediate redeploy therefore needs no Secrets Manager cleanup.
-
-Terraform state contains sensitive values even when Terraform redacts them from
-CLI output. Keep the S3 backend private, encrypted, and versioned; never commit a
-local state or saved plan file.
-
-`backend.hcl` is gitignored. See [backend.hcl.example](terraform/backend.hcl.example) for the required fields.
-
-### Deploy a Lambda code update
-
-CI handles this automatically on merge to `main`. For a manual push see the [Quick Reference](IMPLEMENTATION_GUIDE.md#quick-reference) in the Implementation Guide — it includes the arm64 cross-compile step required when building on macOS.
-
-For a full module-by-module breakdown of what Terraform provisions, see [ARCHITECTURE.md §8](ARCHITECTURE.md#8-terraform-infrastructure-structure).
-
-### Current Deployment Status (July 20, 2026)
-
-The platform has been successfully deployed and validated in AWS. Retrieve the live values for your current environment from Terraform outputs:
-
-```bash
-cd terraform
-terraform output -raw api_gateway_url
-terraform output -raw lambda_function_name
-terraform output -raw cloudwatch_dashboard_url
-```
-
----
-
-## Observability
-
-Metrics are emitted via CloudWatch EMF through Lambda stdout (no agent needed) in the `ai-platform/inference` namespace, dimensioned by `provider`, `model`, and `tier`. Key metrics: `RequestCount`, `InputTokens`, `OutputTokens`, `LatencyMs`, `CacheHit`, `EstimatedCostUSD`, `ErrorCount`.
-
-CloudWatch Alarms fire to SNS on error rate >5%, p99 latency >10s, all providers unhealthy, or projected cost overrun. Lambda X-Ray active tracing is enabled at the infrastructure layer; explicit application segments are tracked as follow-up work in the improvement roadmap.
-
-See [ARCHITECTURE.md §5](ARCHITECTURE.md#5-observability-and-monitoring) for the full metric spec, alarm thresholds, and dashboard layout.
-
-### Verified Smoke Checks
-
-The deployed API has been validated with live checks:
-
-- `GET /health` returns `200` with provider health status.
-- `POST /v1/chat` without auth returns `401`.
-- Authenticated `POST /v1/chat` returns `200` and model output.
-- `POST /v1/chat/stream` returns SSE and ends with `data: [DONE]`.
-- Cache behavior verified (`cache_hit` false on first request, true on repeated prompt).
-
-### Canonical Post-Deploy Smoke Suite
-
-Use this sequence after each `terraform apply` or production deploy:
-
-```bash
-# 1) Resolve runtime values from Terraform outputs
-API_URL=$(cd terraform && terraform output -raw api_gateway_url)
-FUNCTION_NAME=$(cd terraform && terraform output -raw lambda_function_name)
-
-# 2) Health endpoint
-curl -sS "$API_URL/health"
-
-# 3) Unauthorized request should return 401
-curl -sS -o /dev/null -w "%{http_code}\n" \
-  -X POST "$API_URL/v1/chat" \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"hello"}]}'
-
-# 4) Authorized request should return 200 (set API_KEY first)
-curl -sS -o /dev/null -w "%{http_code}\n" \
-  -X POST "$API_URL/v1/chat" \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Return one word: healthy"}]}'
-
-# 5) Streaming endpoint should emit tokens and end with [DONE]
-curl -N -X POST "$API_URL/v1/chat/stream" \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -H "Accept: text/event-stream" \
-  -d '{"messages":[{"role":"user","content":"Stream a short greeting."}]}'
-
-# 6) Confirm recent Lambda logs
-aws logs tail "/aws/lambda/$FUNCTION_NAME" --since 10m
-```
-
-### Deployment Handoff Checklist
-
-- [ ] `terraform apply` completed cleanly with expected plan.
-- [ ] `GET /health` returned `200` and providers are not all unhealthy.
-- [ ] Auth behavior validated (`401` without token, `200` with valid token).
-- [ ] Streaming endpoint returned SSE events and terminated with `[DONE]`.
-- [ ] CloudWatch dashboard URL resolves from `terraform output -raw cloudwatch_dashboard_url`.
-- [ ] No unexpected error spikes in Lambda logs for the deploy window.
-
----
-
-## Roadmap
-
-See [IMPROVEMENT_ROADMAP.md](IMPROVEMENT_ROADMAP.md) for the current execution plan and [ARCHITECTURE.md §11](ARCHITECTURE.md#11-platform-evolution-roadmap) for the longer-range platform evolution view.
+- [Implementation guide](IMPLEMENTATION_GUIDE.md) — deploy and operate the platform
+- [Architecture](ARCHITECTURE.md) — understand design decisions and request flow
+- [Python service guide](ai-platform/README.md) — develop, test, and extend the application
+- [Terraform guide](terraform/README.md) — change and operate the AWS infrastructure
 
 ---
 
