@@ -65,6 +65,18 @@ curl -X POST http://localhost:8080/v1/chat \
 
 Caching is optional locally. When `CACHE_ENABLED=false`, Redis and PostgreSQL connections are not required.
 
+## Containers
+
+From the repository root, start the production-style image with local development settings:
+
+```bash
+docker compose up --build
+curl http://localhost:8080/health
+```
+
+The root `compose.yaml` loads `ai-platform/.env` when present and disables caching by default. The image
+runs as an unprivileged user, includes an HTTP health check, and accepts a `PORT` environment variable.
+
 ## Quality checks
 
 Run all checks before opening a pull request:

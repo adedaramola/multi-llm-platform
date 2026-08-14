@@ -86,12 +86,23 @@ curl -X POST http://localhost:8080/v1/chat \
   -d '{"messages":[{"role":"user","content":"Explain semantic caching briefly."}]}'
 ```
 
-To run with Docker instead:
+To run with Docker Compose instead (an `.env` file is optional for the public health endpoint):
 
 ```bash
-cd ai-platform
-docker build -t ai-platform .
-docker run --env-file .env -p 8080:8080 ai-platform
+docker compose up --build
+curl http://localhost:8080/health
+```
+
+Compose reads provider credentials from `ai-platform/.env`, exposes the API on port 8080, and disables
+caching by default so Redis and PostgreSQL are not required. Set `API_PORT` to change the host port, for
+example `API_PORT=9000 docker compose up --build`. Stop the service with `docker compose down`.
+
+To build and run the image directly:
+
+```bash
+docker build -t multi-llm-platform ./ai-platform
+docker run --rm --env-file ai-platform/.env -e ENVIRONMENT=dev -e CACHE_ENABLED=false \
+  -p 8080:8080 multi-llm-platform
 ```
 
 ## API
