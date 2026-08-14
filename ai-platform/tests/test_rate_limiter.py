@@ -10,9 +10,10 @@ from ai_platform.auth.rate_limiter import RateLimiter
 from fastapi import HTTPException
 
 
-def _limiter(*, fail_open: bool = False) -> RateLimiter:
+def _limiter(*, fail_open: bool = False, is_dev: bool = False) -> RateLimiter:
     limiter = object.__new__(RateLimiter)
     limiter._fail_open = fail_open
+    limiter._is_dev = is_dev
     return limiter
 
 
@@ -51,3 +52,11 @@ async def test_dependency_failure_can_be_configured_fail_open():
     limiter = _limiter(fail_open=True)
     limiter._increment = AsyncMock(side_effect=RuntimeError("DynamoDB unavailable"))
     await limiter.check_and_increment(_caller())
+
+
+@pytest.mark.asyncio
+async def test_dev_environment_bypasses_dynamodb():
+    limiter = _limiter(is_dev=True)
+    limiter._increment = AsyncMock(side_effect=RuntimeError("DynamoDB unavailable"))
+    await limiter.check_and_increment(_caller())
+    limiter._increment.assert_not_called()
