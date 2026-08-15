@@ -206,6 +206,48 @@ class TestLLMRouter:
         providers["mid"][0].stream.assert_not_called()
 
 
+# ── model_preference resolution ─────────────────────────────────────────────
+
+class TestFindPreferredProvider:
+    """openai-gpt4o-mini is a prefix-superstring of openai-gpt4o — an exact
+    match for "openai-gpt4o" must win even though the mini variant is
+    iterated first and also substring-matches."""
+
+    @pytest.fixture
+    def providers(self):
+        return {
+            "mid": [_make_provider("openai-gpt4o-mini", "mid")],
+            "high": [_make_provider("openai-gpt4o", "high")],
+        }
+
+    def test_exact_name_match_wins_over_substring_match(self, providers):
+        with patch("ai_platform.router.router.get_health_registry") as mock_reg:
+            mock_reg.return_value.is_healthy.return_value = True
+            router = LLMRouter(providers)
+            result = router._find_preferred_provider("openai-gpt4o")
+        assert result.name == "openai-gpt4o"
+
+    def test_falls_back_to_substring_match_when_no_exact_match(self, providers):
+        with patch("ai_platform.router.router.get_health_registry") as mock_reg:
+            mock_reg.return_value.is_healthy.return_value = True
+            router = LLMRouter(providers)
+            result = router._find_preferred_provider("gpt4o-mini")
+        assert result.name == "openai-gpt4o-mini"
+
+    def test_returns_none_when_no_match(self, providers):
+        with patch("ai_platform.router.router.get_health_registry") as mock_reg:
+            mock_reg.return_value.is_healthy.return_value = True
+            router = LLMRouter(providers)
+            assert router._find_preferred_provider("nonexistent-model") is None
+
+    def test_skips_unhealthy_exact_match_for_healthy_substring_match(self, providers):
+        with patch("ai_platform.router.router.get_health_registry") as mock_reg:
+            mock_reg.return_value.is_healthy.side_effect = lambda name: name != "openai-gpt4o"
+            router = LLMRouter(providers)
+            result = router._find_preferred_provider("openai-gpt4o")
+        assert result.name == "openai-gpt4o-mini"
+
+
 async def _collect_stream(router: LLMRouter, request: InferenceRequest) -> list[str]:
     return [chunk async for chunk in router.route_stream(request)]
 

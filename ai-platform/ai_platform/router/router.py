@@ -47,17 +47,24 @@ class LLMRouter:
 
     def _find_preferred_provider(self, model_preference: str) -> BaseProvider | None:
         """
-        Return the first healthy provider whose name or model_id matches
-        model_preference (case-insensitive substring match).
+        Return the healthy provider matching model_preference.
+        Exact case-insensitive name/model_id matches take priority over
+        substring matches, so "openai-gpt4o" cannot resolve to
+        "openai-gpt4o-mini" just because it's a prefix of that name.
         """
         registry = get_health_registry()
         pref = model_preference.lower()
+        substring_match: BaseProvider | None = None
         for providers in self._tiers.values():
             for p in providers:
-                matches = pref in p.name.lower() or pref in p.config.model_id.lower()
-                if matches and registry.is_healthy(p.name):
+                if not registry.is_healthy(p.name):
+                    continue
+                name, model_id = p.name.lower(), p.config.model_id.lower()
+                if pref == name or pref == model_id:
                     return p
-        return None
+                if substring_match is None and (pref in name or pref in model_id):
+                    substring_match = p
+        return substring_match
 
     async def _stream_with_timeout(
         self,
