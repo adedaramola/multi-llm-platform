@@ -32,7 +32,7 @@ def bedrock_haiku_config() -> ProviderConfig:
     """Claude Haiku via Bedrock — same model, different billing."""
     return ProviderConfig(
         name="bedrock-claude-haiku",
-        model_id="anthropic.claude-haiku-4-5-20251001-v1:0",
+        model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
         tier="low",
         cost_per_input_token=0.80 / 1_000_000,
         cost_per_output_token=4.00 / 1_000_000,
