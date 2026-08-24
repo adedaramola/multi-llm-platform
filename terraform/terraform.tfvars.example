@@ -1,5 +1,19 @@
 aws_region        = "us-east-1"
-environment       = "production"
+environment       = "dev"
 anthropic_api_key = "sk-ant-..."   # set via TF_VAR_anthropic_api_key env var in CI
 openai_api_key    = "sk-..."       # set via TF_VAR_openai_api_key env var in CI
 alert_email       = "platform-alerts@yourcompany.com"
+
+# Lean provider set: Bedrock primary with direct Anthropic fallback.
+enable_bedrock_provider   = true
+enable_anthropic_provider = true
+enable_openai_provider    = false
+
+# Lean portfolio defaults: Lambda/API Gateway/DynamoDB/Secrets Manager only.
+# Enabling cache provisions a separate VPC, NAT Gateway, ElastiCache, and Aurora.
+cache_enabled                  = false
+enable_provisioned_concurrency = false
+enable_scheduled_health_checks = false
+aurora_min_capacity            = 0
+aurora_max_capacity            = 2
+aurora_seconds_until_auto_pause = 600

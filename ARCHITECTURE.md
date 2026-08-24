@@ -7,6 +7,12 @@
 
 ## 1. Platform Architecture
 
+The approved portfolio runtime is a single Lambda-backed router. It is not also deployed on EKS.
+The lean profile enables Bedrock with Anthropic fallback, disables OpenAI, caching, scheduled
+provider probes, and provisioned concurrency, and creates only the corresponding AWS resources.
+The cache and additional providers shown below are optional scale-up capabilities, not baseline
+dependencies.
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                           CLIENT APPLICATIONS                           │
@@ -96,7 +102,6 @@
 | Low | Bedrock Nova Micro, Claude Haiku 4.5 | Simple Q&A, classification, summarization | ~$0.04–$1 |
 | Mid | Claude Sonnet 4.6, GPT-4o mini | Multi-step reasoning, code gen, RAG answers | ~$3–$10 |
 | High | Claude Opus 4.6, GPT-4o | Complex analysis, long-context, high-stakes | ~$15–$60 |
-| Open | Llama 3 on Fargate | Batch, non-sensitive, cost-critical workloads | ~infra cost only [Phase 3] |
 
 ### Routing Pseudocode
 
@@ -107,7 +112,7 @@ def route_request(request: InferenceRequest) -> Provider:
     if cached:
         return CacheHit(cached)
 
-    # 2. Honour explicit model preference (bypasses complexity routing)
+    # 2. Honour explicit model preference only within the budget ceiling
     if request.model_preference:
         preferred = find_provider(request.model_preference)  # case-insensitive name/model_id match
         if preferred and health_registry.is_healthy(preferred):
@@ -123,9 +128,9 @@ def route_request(request: InferenceRequest) -> Provider:
     tier = select_tier(complexity, request.metadata.budget)
     # budget=LOW → always "low"; budget=HIGH → "mid" or "high"; STANDARD → complexity-based
 
-    # 5. Build fallback chain starting at target tier
-    #    low → [low, mid, high]   mid → [mid, low, high]   high → [high, mid, low]
-    tier_order = build_fallback_chain(tier)
+    # 5. Build fallback chain starting at target tier.
+    #    budget=LOW is a hard [low] ceiling and cannot escalate.
+    tier_order = build_fallback_chain(tier, request.metadata.budget)
 
     # 6. For each tier, filter to healthy providers sorted by cost
     for tier in tier_order:

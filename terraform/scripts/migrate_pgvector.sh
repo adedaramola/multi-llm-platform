@@ -20,6 +20,7 @@ run_sql 'CREATE EXTENSION IF NOT EXISTS vector'
 run_sql 'CREATE TABLE IF NOT EXISTS semantic_cache (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   prompt_hash TEXT NOT NULL UNIQUE,
+  cache_namespace TEXT NOT NULL DEFAULT '\''shared'\'',
   embedding VECTOR(1536) NOT NULL,
   response TEXT NOT NULL,
   model_used TEXT NOT NULL,
@@ -28,6 +29,10 @@ run_sql 'CREATE TABLE IF NOT EXISTS semantic_cache (
   created_at TIMESTAMPTZ DEFAULT NOW(),
   expires_at TIMESTAMPTZ
 )'
+run_sql 'ALTER TABLE semantic_cache
+  ADD COLUMN IF NOT EXISTS cache_namespace TEXT NOT NULL DEFAULT '\''shared'\'''
+run_sql 'CREATE INDEX IF NOT EXISTS semantic_cache_namespace_idx
+  ON semantic_cache (cache_namespace)'
 run_sql 'CREATE INDEX IF NOT EXISTS semantic_cache_embedding_idx
   ON semantic_cache USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)'
 

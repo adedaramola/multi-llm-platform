@@ -7,6 +7,7 @@ Two layers:
 
 On cache miss the caller is responsible for writing the response back.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -42,14 +43,22 @@ def _normalize_constraint(model_constraint: str) -> str:
     return model_constraint.strip().lower()
 
 
-def _cache_key(prompt: str, model_constraint: str = "") -> str:
+def _normalize_namespace(namespace: str) -> str:
+    normalized = namespace.strip().lower()
+    if not normalized:
+        raise ValueError("Cache namespace cannot be empty")
+    return normalized
+
+
+def _cache_key(prompt: str, model_constraint: str = "", namespace: str = "shared") -> str:
     """
     Cache key over the normalized prompt AND the caller's model constraint,
     so a request pinned to one model is never served another model's answer.
     """
     normalized = _normalize_prompt(prompt)
     constraint = _normalize_constraint(model_constraint)
-    return hashlib.sha256(f"{constraint}\x00{normalized}".encode()).hexdigest()
+    cache_namespace = _normalize_namespace(namespace)
+    return hashlib.sha256(f"{cache_namespace}\x00{constraint}\x00{normalized}".encode()).hexdigest()
 
 
 def _vector_literal(embedding: list[float]) -> str:
@@ -100,13 +109,19 @@ class SemanticCache:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._embed_sync, text)
 
-    async def lookup(self, prompt: str, model_constraint: str = "") -> CacheResult | None:
+    async def lookup(
+        self,
+        prompt: str,
+        model_constraint: str = "",
+        namespace: str = "shared",
+    ) -> CacheResult | None:
         if not self._settings.cache_enabled:
             return None
 
         normalized = _normalize_prompt(prompt)
         constraint = _normalize_constraint(model_constraint)
-        prompt_hash = _cache_key(prompt, constraint)
+        cache_namespace = _normalize_namespace(namespace)
+        prompt_hash = _cache_key(prompt, constraint, cache_namespace)
 
         # ── Layer 1: Redis exact match ────────────────────────────────────────
         try:
@@ -137,12 +152,14 @@ class SemanticCache:
                        1 - (embedding <=> $1::vector) AS similarity
                 FROM semantic_cache
                 WHERE (expires_at IS NULL OR expires_at > NOW())
+                  AND cache_namespace = $3
                   AND ($2 = '' OR model_used ILIKE '%' || $2 || '%')
                 ORDER BY embedding <=> $1::vector
                 LIMIT 1
                 """,
                 _vector_literal(embedding),
                 constraint,
+                cache_namespace,
             )
             if row and row["similarity"] >= self._settings.semantic_cache_threshold:
                 logger.info(
@@ -171,17 +188,21 @@ class SemanticCache:
         output_tokens: int,
         ttl_seconds: int | None = None,
         model_constraint: str = "",
+        namespace: str = "shared",
     ) -> None:
         """Store response in both Redis and pgvector."""
         if not self._settings.cache_enabled:
             return
 
         normalized = _normalize_prompt(prompt)
-        prompt_hash = _cache_key(prompt, model_constraint)
+        cache_namespace = _normalize_namespace(namespace)
+        prompt_hash = _cache_key(prompt, model_constraint, cache_namespace)
 
         # Write to Redis first (fast path for future exact hits)
         await self._promote_to_redis(
-            prompt_hash, response, model_used,
+            prompt_hash,
+            response,
+            model_used,
             ttl=ttl_seconds or self._settings.redis_ttl_seconds,
         )
 
@@ -192,14 +213,14 @@ class SemanticCache:
             embedding = await self._embed(normalized)
             pg = await self._get_pg()
             expires_at: datetime.datetime | None = (
-                datetime.datetime.utcnow() + datetime.timedelta(seconds=ttl_seconds)
-                if ttl_seconds else None
+                datetime.datetime.utcnow() + datetime.timedelta(seconds=ttl_seconds) if ttl_seconds else None
             )
             await pg.execute(
                 """
                 INSERT INTO semantic_cache
-                    (prompt_hash, embedding, response, model_used, input_tokens, output_tokens, expires_at)
-                VALUES ($1, $2::vector, $3, $4, $5, $6, $7)
+                    (prompt_hash, cache_namespace, embedding, response, model_used,
+                     input_tokens, output_tokens, expires_at)
+                VALUES ($1, $2, $3::vector, $4, $5, $6, $7, $8)
                 ON CONFLICT (prompt_hash) DO UPDATE
                     SET response = EXCLUDED.response,
                         model_used = EXCLUDED.model_used,
@@ -208,6 +229,7 @@ class SemanticCache:
                         created_at = NOW()
                 """,
                 prompt_hash,
+                cache_namespace,
                 _vector_literal(embedding),
                 response,
                 model_used,

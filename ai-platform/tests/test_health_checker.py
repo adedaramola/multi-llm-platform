@@ -25,6 +25,9 @@ def test_run_checks_closes_all_provider_clients_inside_event_loop():
     openai.close = AsyncMock()
 
     settings = MagicMock(
+        bedrock_enabled=True,
+        anthropic_enabled=True,
+        openai_enabled=True,
         anthropic_api_key="anthropic-key",
         anthropic_secret_arn="",
         openai_api_key="openai-key",
@@ -53,6 +56,9 @@ def test_run_checks_still_closes_clients_when_check_raises():
     provider.health_check = AsyncMock(side_effect=RuntimeError("failed"))
     provider.close = AsyncMock()
     settings = MagicMock(
+        bedrock_enabled=True,
+        anthropic_enabled=False,
+        openai_enabled=False,
         anthropic_api_key="",
         anthropic_secret_arn="",
         openai_api_key="",

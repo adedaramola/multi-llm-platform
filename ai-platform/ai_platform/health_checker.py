@@ -3,6 +3,7 @@ Provider health checker — invoked by EventBridge every 5 minutes.
 Runs health_check() on one representative provider per family,
 then writes results to DynamoDB so the gateway can route around failures.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -64,25 +65,27 @@ async def _run_checks() -> list[dict]:
     settings = get_settings()
 
     # Resolve API keys
-    anthropic_key = settings.anthropic_api_key
-    if not anthropic_key and settings.anthropic_secret_arn:
+    anthropic_key = settings.anthropic_api_key if settings.anthropic_enabled else ""
+    if settings.anthropic_enabled and not anthropic_key and settings.anthropic_secret_arn:
         try:
             anthropic_key = fetch_secret(settings.anthropic_secret_arn)
         except Exception as exc:
             logger.error("anthropic_secret_fetch_failed", extra={"error": str(exc)})
 
-    openai_key = settings.openai_api_key
-    if not openai_key and settings.openai_secret_arn:
+    openai_key = settings.openai_api_key if settings.openai_enabled else ""
+    if settings.openai_enabled and not openai_key and settings.openai_secret_arn:
         try:
             openai_key = fetch_secret(settings.openai_secret_arn)
         except Exception as exc:
             logger.error("openai_secret_fetch_failed", extra={"error": str(exc)})
 
     # One representative per provider family — cheapest model sufficient for liveness check
-    providers: list[BaseProvider] = [BedrockProvider(nova_micro_config())]
-    if anthropic_key:
+    providers: list[BaseProvider] = []
+    if settings.bedrock_enabled:
+        providers.append(BedrockProvider(nova_micro_config()))
+    if settings.anthropic_enabled and anthropic_key:
         providers.append(AnthropicProvider(haiku_config(), anthropic_key))
-    if openai_key:
+    if settings.openai_enabled and openai_key:
         providers.append(OpenAIProvider(gpt4o_mini_config(), openai_key))
 
     registry = ProviderHealthRegistry()

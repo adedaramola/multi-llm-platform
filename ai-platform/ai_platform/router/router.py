@@ -3,13 +3,14 @@ Cost-aware LLM router.
 Selects the cheapest healthy provider in the appropriate tier,
 with automatic fallback to the next tier on failure.
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 
-from ..models.schemas import InferenceRequest
+from ..models.schemas import BudgetHint, InferenceRequest
 from ..providers.base import BaseProvider, ProviderResponse
 from .health import get_health_registry
 from .policies import estimate_complexity, select_tier
@@ -45,7 +46,11 @@ class LLMRouter:
         # Sort by cost_per_token ascending, then priority ascending
         return sorted(healthy, key=lambda p: (p.cost_per_token, p.config.priority))
 
-    def _find_preferred_provider(self, model_preference: str) -> BaseProvider | None:
+    def _find_preferred_provider(
+        self,
+        model_preference: str,
+        allowed_tiers: set[str] | None = None,
+    ) -> BaseProvider | None:
         """
         Return the healthy provider matching model_preference.
         Exact case-insensitive name/model_id matches take priority over
@@ -55,7 +60,9 @@ class LLMRouter:
         registry = get_health_registry()
         pref = model_preference.lower()
         substring_match: BaseProvider | None = None
-        for providers in self._tiers.values():
+        for tier, providers in self._tiers.items():
+            if allowed_tiers is not None and tier not in allowed_tiers:
+                continue
             for p in providers:
                 if not registry.is_healthy(p.name):
                     continue
@@ -119,10 +126,14 @@ class LLMRouter:
         registry = get_health_registry()
         timeout = float(request.metadata.latency_sla_ms / 1000)
         last_error: Exception | None = None
+        tier_order = self._build_fallback_chain(target_tier, request.metadata.budget)
 
         # ── Preferred provider pin ────────────────────────────────────────────
         if request.model_preference:
-            preferred = self._find_preferred_provider(request.model_preference)
+            preferred = self._find_preferred_provider(
+                request.model_preference,
+                allowed_tiers=set(tier_order),
+            )
             if preferred:
                 if on_provider_selected:
                     on_provider_selected(preferred.name, preferred.tier)
@@ -155,7 +166,6 @@ class LLMRouter:
                 )
 
         # ── Tier-based fallback chain ─────────────────────────────────────────
-        tier_order = self._build_fallback_chain(target_tier)
         for tier in tier_order:
             candidates = self._get_candidates(tier)
             for provider in candidates:
@@ -184,9 +194,7 @@ class LLMRouter:
                     registry.mark_failure(provider.name)
                     last_error = exc
 
-        raise RuntimeError(
-            f"All providers exhausted. Last error: {last_error}"
-        ) from last_error
+        raise RuntimeError(f"All providers exhausted. Last error: {last_error}") from last_error
 
     async def route_stream(
         self,
@@ -204,10 +212,14 @@ class LLMRouter:
         messages = [m.model_dump() for m in request.messages]
         registry = get_health_registry()
         timeout = float(request.metadata.latency_sla_ms / 1000)
+        tier_order = self._build_fallback_chain(target_tier, request.metadata.budget)
 
         # Preferred provider pin
         if request.model_preference:
-            preferred = self._find_preferred_provider(request.model_preference)
+            preferred = self._find_preferred_provider(
+                request.model_preference,
+                allowed_tiers=set(tier_order),
+            )
             if preferred:
                 if on_provider_selected:
                     on_provider_selected(preferred.name, preferred.tier)
@@ -233,9 +245,7 @@ class LLMRouter:
                     )
                     registry.mark_failure(preferred.name)
                     if yielded_any:
-                        raise StreamInterruptedError(
-                            f"{preferred.name} timed out mid-stream"
-                        ) from exc
+                        raise StreamInterruptedError(f"{preferred.name} timed out mid-stream") from exc
                 except Exception as exc:
                     logger.warning(
                         "preferred_provider_stream_error",
@@ -243,12 +253,9 @@ class LLMRouter:
                     )
                     registry.mark_failure(preferred.name)
                     if yielded_any:
-                        raise StreamInterruptedError(
-                            f"{preferred.name} failed mid-stream: {exc}"
-                        ) from exc
+                        raise StreamInterruptedError(f"{preferred.name} failed mid-stream: {exc}") from exc
 
         # Tier-based selection
-        tier_order = self._build_fallback_chain(target_tier)
         for tier in tier_order:
             candidates = self._get_candidates(tier)
             for provider in candidates:
@@ -276,9 +283,7 @@ class LLMRouter:
                     )
                     registry.mark_failure(provider.name)
                     if yielded_any:
-                        raise StreamInterruptedError(
-                            f"{provider.name} timed out mid-stream"
-                        ) from exc
+                        raise StreamInterruptedError(f"{provider.name} timed out mid-stream") from exc
                 except Exception as exc:
                     logger.warning(
                         "provider_stream_error",
@@ -286,18 +291,20 @@ class LLMRouter:
                     )
                     registry.mark_failure(provider.name)
                     if yielded_any:
-                        raise StreamInterruptedError(
-                            f"{provider.name} failed mid-stream: {exc}"
-                        ) from exc
+                        raise StreamInterruptedError(f"{provider.name} failed mid-stream: {exc}") from exc
 
         raise RuntimeError("All providers exhausted for streaming request.")
 
-    def _build_fallback_chain(self, target_tier: str) -> list[str]:
+    def _build_fallback_chain(self, target_tier: str, budget: BudgetHint) -> list[str]:
         """
-        Start at target tier. If it fails, try tiers in this order:
+        Low-budget requests are hard-capped to the low tier. Other budgets start
+        at their selected tier and retain cross-tier resilience:
           low → low, mid, high
           mid → mid, low, high
           high → high, mid, low
         """
+        if budget == BudgetHint.LOW:
+            return ["low"]
+
         others = [t for t in self._fallback_order if t != target_tier]
         return [target_tier] + others

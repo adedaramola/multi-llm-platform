@@ -13,3 +13,8 @@ variable "health_checker_function_arn" {
   type        = string
   description = "ARN of the health-checker Lambda function"
 }
+
+variable "provisioned_concurrency" {
+  type        = bool
+  description = "Whether CI needs permission to inspect provisioned concurrency."
+}

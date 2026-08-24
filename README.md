@@ -13,7 +13,7 @@ The platform is designed for a small engineering team that needs production infr
 - Synchronous and Server-Sent Events streaming responses
 - DynamoDB API-key authentication and per-client RPM/RPD limits
 - Per-client token, request, cache-hit, and estimated-cost accounting
-- Scheduled provider health checks and circuit breaking
+- Optional scheduled provider health checks and circuit breaking
 - CloudWatch metrics, alarms, dashboards, logs, and active X-Ray tracing
 - Modular Terraform and GitHub Actions deployment through AWS OIDC
 
@@ -36,10 +36,10 @@ Lambda · FastAPI + Mangum
   │     └── OpenAI
   └── Usage and operational metrics · DynamoDB + CloudWatch
 
-EventBridge → Health-checker Lambda → Provider health table
+EventBridge (optional) → Health-checker Lambda → Provider health table
 ```
 
-Requests check the exact and semantic caches before reaching the router. On a cache miss, the router chooses an eligible model tier, skips unhealthy providers, and falls back when a provider fails. Successful responses update usage, metrics, and the cache.
+Requests check the exact and semantic caches before reaching the router. On a cache miss, the router chooses an eligible model tier, skips unhealthy providers, and falls back when a provider fails. Low-budget requests are hard-capped to low-tier models. Successful responses update usage, metrics, and the cache.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for routing details, infrastructure design, the cache schema, cost assumptions, and operational risks.
 
@@ -131,12 +131,19 @@ All `/v1` endpoints require `Authorization: Bearer <api-key>`. The `/health` end
     "budget": "standard",
     "latency_sla_ms": 5000,
     "reasoning_required": false,
-    "caller_app": "example-service"
+    "caller_app": "example-service",
+    "workflow_id": "workflow-123",
+    "cache_policy": "private",
+    "data_classification": "restricted"
   }
 }
 ```
 
-`messages` accepts 1–50 `system`, `user`, or `assistant` messages. `model_preference` is optional and matches a provider name or model ID; normal tier routing is used if the preferred model is unavailable. Budget values are `low`, `standard`, and `high`.
+`messages` accepts 1–50 `system`, `user`, or `assistant` messages. `model_preference` is optional and matches an enabled provider name or model ID within the request's budget ceiling; normal tier routing is used if the preferred model is unavailable or exceeds that ceiling. Budget values are `low`, `standard`, and `high`.
+
+Cache policy defaults to `off`. `private` isolates exact and semantic cache entries by the
+authenticated caller. `shared` is accepted only when `data_classification` is `public`.
+Production requests that set `caller_app` must match the application name bound to the API key.
 
 ### Chat response
 
@@ -154,6 +161,7 @@ All `/v1` endpoints require `Authorization: Bearer <api-key>`. The `/health` end
   },
   "cache_hit": false,
   "cache_source": "none",
+  "cache_policy": "private",
   "latency_ms": 940,
   "timestamp": 1784600000.0
 }
@@ -220,15 +228,15 @@ terraform validate
 
 ## Deployment
 
-AWS infrastructure is managed entirely with Terraform. A full deployment creates:
+AWS infrastructure is managed entirely with Terraform. The default portfolio deployment creates:
 
-- VPC networking and private service access
 - DynamoDB auth, rate-limit, provider-health, and usage tables
 - Secrets Manager provider and bootstrap-client secrets
-- ElastiCache Serverless and Aurora Serverless with pgvector
-- Gateway and scheduled health-checker Lambdas
+- One gateway Lambda; the health-checker Lambda is omitted by default
 - API Gateway routes, CloudWatch monitoring, and SNS alerts
 - GitHub Actions OIDC provider and least-privilege deployment role
+
+The full opt-in profile also creates VPC networking, ElastiCache Serverless, Aurora Serverless with pgvector, scheduled health checks, and provisioned Lambda concurrency.
 
 Follow [IMPLEMENTATION_GUIDE.md](IMPLEMENTATION_GUIDE.md) for the supported first deployment, verification suite, CI setup, routine updates, and troubleshooting. The first deployment requires a `linux/arm64` Lambda package before `terraform apply`.
 
@@ -242,7 +250,7 @@ Important groups include:
 - Redis and PostgreSQL connections
 - Cache TTL and semantic-similarity threshold
 - DynamoDB table names and rate-limit behavior
-- Complexity thresholds, provider retries, and timeouts
+- Complexity thresholds, provider switches, budget ceilings, and timeouts
 - Circuit-breaker thresholds and cooldowns
 
 Settings are loaded once per Lambda cold start. Production provider credentials are resolved from Secrets Manager rather than stored as plaintext Lambda environment variables.

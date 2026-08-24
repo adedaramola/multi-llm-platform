@@ -1,6 +1,7 @@
 """
 Unit tests for router/router.py — mocks providers and health registry.
 """
+
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -30,16 +31,16 @@ def _make_provider(name: str, tier: str, healthy: bool = True) -> MagicMock:
     provider.name = name
     provider.tier = tier
     provider.config = cfg
-    provider.cost_per_token = (
-        cfg.cost_per_input_token + cfg.cost_per_output_token
-    ) / 2
-    provider.complete = AsyncMock(return_value=ProviderResponse(
-        content="test response",
-        input_tokens=10,
-        output_tokens=5,
-        model_id=f"test/{name}",
-        provider_name=name,
-    ))
+    provider.cost_per_token = (cfg.cost_per_input_token + cfg.cost_per_output_token) / 2
+    provider.complete = AsyncMock(
+        return_value=ProviderResponse(
+            content="test response",
+            input_tokens=10,
+            output_tokens=5,
+            model_id=f"test/{name}",
+            provider_name=name,
+        )
+    )
     provider.stream = MagicMock(side_effect=lambda **kwargs: _stream_from_chunks("test response"))
     return provider
 
@@ -58,8 +59,8 @@ def _req(
 @pytest.fixture
 def providers():
     return {
-        "low":  [_make_provider("cheap-model", "low")],
-        "mid":  [_make_provider("mid-model", "mid")],
+        "low": [_make_provider("cheap-model", "low")],
+        "mid": [_make_provider("mid-model", "mid")],
         "high": [_make_provider("expensive-model", "high")],
     }
 
@@ -70,6 +71,7 @@ def router(providers):
 
 
 # ── Routing behaviour ──────────────────────────────────────────────────────────
+
 
 class TestLLMRouter:
     def test_low_budget_routes_to_low_tier(self, router, providers):
@@ -85,18 +87,40 @@ class TestLLMRouter:
             result = asyncio.run(router.route(_req("hi")))
         assert result.provider_name == "cheap-model"
 
-    def test_falls_back_when_provider_unhealthy(self, providers):
+    def test_low_budget_does_not_escalate_when_provider_unhealthy(self, providers):
         with patch("ai_platform.router.router.get_health_registry") as mock_reg:
             # low tier is unhealthy, mid is healthy
             def is_healthy(name):
                 return name != "cheap-model"
+
             mock_reg.return_value.is_healthy.side_effect = is_healthy
 
             router = LLMRouter(providers)
-            result = asyncio.run(router.route(_req(budget=BudgetHint.LOW)))
+            with pytest.raises(RuntimeError, match="All providers exhausted"):
+                asyncio.run(router.route(_req(budget=BudgetHint.LOW)))
 
-        # Should fall back up the chain to mid
+        providers["mid"][0].complete.assert_not_called()
+        providers["high"][0].complete.assert_not_called()
+
+    def test_standard_budget_falls_back_when_provider_unhealthy(self, providers):
+        with patch("ai_platform.router.router.get_health_registry") as mock_reg:
+            mock_reg.return_value.is_healthy.side_effect = lambda name: name != "cheap-model"
+            router = LLMRouter(providers)
+            result = asyncio.run(router.route(_req(budget=BudgetHint.STANDARD)))
+
         assert result.provider_name == "mid-model"
+
+    def test_low_budget_ignores_high_tier_model_preference(self, providers):
+        request = _req(budget=BudgetHint.LOW)
+        request.model_preference = "expensive-model"
+
+        with patch("ai_platform.router.router.get_health_registry") as mock_reg:
+            mock_reg.return_value.is_healthy.return_value = True
+            router = LLMRouter(providers)
+            result = asyncio.run(router.route(request))
+
+        assert result.provider_name == "cheap-model"
+        providers["high"][0].complete.assert_not_called()
 
     def test_raises_when_all_providers_fail(self, providers):
         # Make all providers raise exceptions
@@ -158,9 +182,25 @@ class TestLLMRouter:
         with patch("ai_platform.router.router.get_health_registry") as mock_reg:
             mock_reg.return_value.is_healthy.return_value = True
             router = LLMRouter(providers)
-            chunks = asyncio.run(_collect_stream(router, _req(budget=BudgetHint.LOW)))
+            chunks = asyncio.run(_collect_stream(router, _req(budget=BudgetHint.STANDARD)))
 
         assert chunks == ["mid response"]
+
+    def test_low_budget_stream_does_not_escalate(self, providers):
+        async def broken_stream(**kwargs):
+            raise ConnectionError("refused")
+            yield  # pragma: no cover — makes this an async generator
+
+        providers["low"][0].stream = MagicMock(side_effect=broken_stream)
+
+        with patch("ai_platform.router.router.get_health_registry") as mock_reg:
+            mock_reg.return_value.is_healthy.return_value = True
+            router = LLMRouter(providers)
+            with pytest.raises(RuntimeError, match="All providers exhausted"):
+                asyncio.run(_collect_stream(router, _req(budget=BudgetHint.LOW)))
+
+        providers["mid"][0].stream.assert_not_called()
+        providers["high"][0].stream.assert_not_called()
 
     def test_stream_error_mid_stream_raises_without_fallback(self, providers):
         async def dying_stream(**kwargs):
@@ -196,9 +236,7 @@ class TestLLMRouter:
             mock_reg.return_value.is_healthy.return_value = True
             router = LLMRouter(providers)
             chunks, interrupted = asyncio.run(
-                _collect_stream_until_error(
-                    router, _req(budget=BudgetHint.LOW, latency_sla_ms=500)
-                )
+                _collect_stream_until_error(router, _req(budget=BudgetHint.LOW, latency_sla_ms=500))
             )
 
         assert chunks == ["partial-1"]
@@ -207,6 +245,7 @@ class TestLLMRouter:
 
 
 # ── model_preference resolution ─────────────────────────────────────────────
+
 
 class TestFindPreferredProvider:
     """openai-gpt4o-mini is a prefix-superstring of openai-gpt4o — an exact
@@ -252,9 +291,7 @@ async def _collect_stream(router: LLMRouter, request: InferenceRequest) -> list[
     return [chunk async for chunk in router.route_stream(request)]
 
 
-async def _collect_stream_until_error(
-    router: LLMRouter, request: InferenceRequest
-) -> tuple[list[str], bool]:
+async def _collect_stream_until_error(router: LLMRouter, request: InferenceRequest) -> tuple[list[str], bool]:
     """Collect chunks, returning (chunks, was_interrupted_mid_stream)."""
     chunks: list[str] = []
     try:

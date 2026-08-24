@@ -1,6 +1,6 @@
 # Terraform Infrastructure
 
-This directory defines the AWS infrastructure for the Multi-LLM Platform. The root module composes networking, data stores, authentication, compute, API Gateway, health checks, monitoring, and CI/CD into one deployment.
+This directory defines the AWS infrastructure for the Multi-LLM Platform. The root module supports a lean portfolio deployment and an optional full semantic-cache deployment from the same configuration.
 
 Use the [implementation guide](../IMPLEMENTATION_GUIDE.md) for the complete first-deployment and verification workflow. This document explains the Terraform layout and day-to-day infrastructure workflow.
 
@@ -8,16 +8,34 @@ Use the [implementation guide](../IMPLEMENTATION_GUIDE.md) for the complete firs
 
 | Module | Responsibility |
 |---|---|
-| `networking` | VPC, private subnets, security groups, and AWS service endpoints |
+| `networking` | Optional VPC, private subnets, security groups, and AWS service endpoints |
 | `auth` | DynamoDB auth, rate-limit, health, and usage tables; provider and bootstrap secrets |
-| `caching` | ElastiCache Serverless and Aurora Serverless PostgreSQL with pgvector connectivity |
-| `lambda_router` | Gateway Lambda, IAM permissions, alias, and provisioned concurrency |
+| `caching` | Optional ElastiCache Serverless and Aurora Serverless PostgreSQL with pgvector connectivity |
+| `lambda_router` | Gateway Lambda, IAM permissions, alias, and optional provisioned concurrency |
 | `api_gateway` | HTTP API routes and Lambda integration |
-| `health_checker` | Scheduled provider-health Lambda and EventBridge trigger |
+| `health_checker` | Provider-health Lambda and optional EventBridge schedule |
 | `monitoring` | CloudWatch dashboard, alarms, and SNS notifications |
 | `ci_cd` | GitHub OIDC provider and scoped Lambda deployment role |
 
-The root `main.tf` wires these modules together. `terraform apply` also runs `scripts/migrate_pgvector.sh` through the RDS Data API after Aurora is ready.
+The root `main.tf` wires these modules together. When caching is enabled, `terraform apply` also runs `scripts/migrate_pgvector.sh` through the RDS Data API after Aurora is ready.
+
+## Deployment profiles
+
+The checked-in example uses the lean portfolio profile:
+
+```hcl
+environment                    = "dev"
+enable_bedrock_provider        = true
+enable_anthropic_provider      = true
+enable_openai_provider         = false
+cache_enabled                  = false
+enable_provisioned_concurrency = false
+enable_scheduled_health_checks = false
+```
+
+This profile deploys one gateway Lambda, API Gateway, DynamoDB tables, only the enabled provider secrets, monitoring, and a scoped CI/CD role. It does not create the health-checker Lambda, platform VPC/NAT, ElastiCache, Aurora, pgvector migration, or recurring provider probes. The gateway Lambda runs outside a VPC and does not receive EC2 network-interface permissions.
+
+Set `cache_enabled = true` to add the exact and semantic cache stack. Scheduled health checks and provisioned concurrency are separate opt-ins so they can be enabled only for sustained environments. When caching is disabled, configure consumers such as OpsDesk with `OPS_AGENT_LLM_GATEWAY_CACHE_POLICY=off`.
 
 ## Files
 
@@ -108,9 +126,18 @@ The root module accepts:
 |---|---|---|
 | `aws_region` | No | AWS region; defaults to `us-east-1` |
 | `environment` | No | `production`, `staging`, or `dev`; defaults to `production` |
-| `anthropic_api_key` | Yes | Stored in Secrets Manager; also present in protected state |
-| `openai_api_key` | No | Optional OpenAI credential stored in Secrets Manager |
+| `anthropic_api_key` | Conditional | Required and stored in Secrets Manager only when Anthropic is enabled |
+| `openai_api_key` | Conditional | Required and stored in Secrets Manager only when OpenAI is enabled |
 | `alert_email` | Yes | SNS destination for CloudWatch alarms |
+| `enable_bedrock_provider` | No | Enable Bedrock models; defaults to `true` |
+| `enable_anthropic_provider` | No | Enable Anthropic models and its secret; defaults to `true` |
+| `enable_openai_provider` | No | Enable OpenAI models and its secret; defaults to `false` |
+| `cache_enabled` | No | Create the VPC, ElastiCache, Aurora, and pgvector cache stack; defaults to `false` |
+| `enable_provisioned_concurrency` | No | Keep two gateway environments warm; defaults to `false` |
+| `enable_scheduled_health_checks` | No | Probe providers every five minutes; defaults to `false` |
+| `aurora_min_capacity` | No | Minimum ACUs when caching is enabled; defaults to `0` |
+| `aurora_max_capacity` | No | Maximum ACUs when caching is enabled; defaults to `2` |
+| `aurora_seconds_until_auto_pause` | No | Idle time before a zero-minimum Aurora cluster pauses; defaults to `600` |
 
 Prefer protected CI variables such as `TF_VAR_anthropic_api_key` for automation. Regardless of input method, Terraform state will contain sensitive provider values and must be protected.
 
@@ -130,7 +157,7 @@ Treat the returned value as a production credential. Create separate API keys fo
 
 ## Database migration
 
-The `terraform_data.pgvector_migration` resource runs the migration after the Aurora cluster is ready. It re-runs when the cluster changes or `scripts/migrate_pgvector.sh` changes.
+When `cache_enabled = true`, the `terraform_data.pgvector_migration` resource runs the migration after the Aurora cluster is ready. It re-runs when the cluster changes or `scripts/migrate_pgvector.sh` changes.
 
 The migration is idempotent and creates the pgvector extension, semantic-cache table, and indexes. Normal deployments do not require manual SQL execution.
 

@@ -17,3 +17,8 @@ output "bootstrap_api_key_secret_arn" {
   description = "Retrieve this secret once to call the deployed API"
   value       = module.auth.bootstrap_api_key_secret_arn
 }
+
+output "opsdesk_agent_api_key_secret_arn" {
+  description = "Secrets Manager ARN for the scoped OpsDesk Agent gateway credential"
+  value       = module.auth.opsdesk_agent_api_key_secret_arn
+}
