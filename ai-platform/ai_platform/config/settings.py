@@ -2,6 +2,7 @@
 Centralized configuration via environment variables.
 Loaded once at Lambda cold start; never queried at runtime per-request.
 """
+
 from __future__ import annotations
 
 from functools import lru_cache
@@ -23,15 +24,20 @@ class Settings(BaseSettings):
     anthropic_secret_arn: str = ""
     openai_secret_arn: str = ""
 
+    # ── Provider switches ────────────────────────────────────────────────────
+    bedrock_enabled: bool = True
+    anthropic_enabled: bool = True
+    openai_enabled: bool = False
+
     # ── AWS Bedrock ───────────────────────────────────────────────────────────
     bedrock_region: str = "us-east-1"
 
     # ── Cache ──────────────────────────────────────────────────────────────────
-    redis_url: str = ""                    # ElastiCache Serverless endpoint
+    redis_url: str = ""  # ElastiCache Serverless endpoint
     redis_ttl_seconds: int = 3600
-    pg_dsn: str = ""                       # Aurora Serverless pgvector DSN (direct)
-    pg_secret_arn: str = ""               # RDS-managed master user secret ARN
-    pg_host: str = ""                     # Aurora endpoint (RDS secret has credentials only)
+    pg_dsn: str = ""  # Aurora Serverless pgvector DSN (direct)
+    pg_secret_arn: str = ""  # RDS-managed master user secret ARN
+    pg_host: str = ""  # Aurora endpoint (RDS secret has credentials only)
     pg_port: int = 5432
     pg_database: str = "ai_platform"
     semantic_cache_threshold: float = 0.92
@@ -45,14 +51,13 @@ class Settings(BaseSettings):
     usage_table: str = "ai-platform-usage"
 
     # ── Rate Limits (defaults, overridden per API key) ────────────────────────
-    default_rpm: int = 60       # requests per minute
-    default_rpd: int = 5_000    # requests per day
+    default_rpm: int = 60  # requests per minute
+    default_rpd: int = 5_000  # requests per day
     rate_limit_fail_open: bool = False
 
     # ── Routing ───────────────────────────────────────────────────────────────
     complexity_low_threshold: float = 0.3
     complexity_mid_threshold: float = 0.7
-    max_provider_retries: int = 2
     provider_timeout_seconds: int = 30
     circuit_breaker_failure_threshold: int = 3
     circuit_breaker_cooldown_seconds: int = 60

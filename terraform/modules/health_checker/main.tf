@@ -1,5 +1,6 @@
 locals {
-  function_name = "ai-platform-health-checker-${var.environment}"
+  function_name        = "ai-platform-health-checker-${var.environment}"
+  provider_secret_arns = compact([var.anthropic_secret_arn, var.openai_secret_arn])
 }
 
 # ── IAM Role ──────────────────────────────────────────────────────────────────
@@ -22,28 +23,34 @@ resource "aws_iam_role_policy" "health_checker" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "arn:aws:logs:${var.aws_region}:*:log-group:/aws/lambda/${local.function_name}:*"
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Scan"]
-        Resource = "arn:aws:dynamodb:${var.aws_region}:*:table/${var.health_table_name}"
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [var.anthropic_secret_arn, var.openai_secret_arn]
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["bedrock:InvokeModel"]
-        Resource = "*"
-      },
-    ]
+    Statement = concat(
+      [
+        {
+          Effect   = "Allow"
+          Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+          Resource = "arn:aws:logs:${var.aws_region}:*:log-group:/aws/lambda/${local.function_name}:*"
+        },
+        {
+          Effect   = "Allow"
+          Action   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Scan"]
+          Resource = "arn:aws:dynamodb:${var.aws_region}:*:table/${var.health_table_name}"
+        },
+      ],
+      length(local.provider_secret_arns) > 0 ? [
+        {
+          Effect   = "Allow"
+          Action   = ["secretsmanager:GetSecretValue"]
+          Resource = local.provider_secret_arns
+        }
+      ] : [],
+      var.bedrock_enabled ? [
+        {
+          Effect   = "Allow"
+          Action   = ["bedrock:InvokeModel"]
+          Resource = "*"
+        }
+      ] : []
+    )
   })
 }
 
@@ -67,6 +74,9 @@ resource "aws_lambda_function" "health_checker" {
       HEALTH_TABLE         = var.health_table_name
       ANTHROPIC_SECRET_ARN = var.anthropic_secret_arn
       OPENAI_SECRET_ARN    = var.openai_secret_arn
+      BEDROCK_ENABLED      = tostring(var.bedrock_enabled)
+      ANTHROPIC_ENABLED    = tostring(var.anthropic_enabled)
+      OPENAI_ENABLED       = tostring(var.openai_enabled)
       CACHE_ENABLED        = "false" # not needed for health checks
     }
   }

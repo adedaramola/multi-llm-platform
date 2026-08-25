@@ -2,6 +2,7 @@
 Unit tests for cache/semantic_cache.py using in-memory fakes.
 No Redis, Postgres, or AWS access — fakes are injected onto the instance.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -50,6 +51,7 @@ def test_vector_literal_is_accepted_pgvector_text_form():
 
 # ── DSN wiring ─────────────────────────────────────────────────────────────────
 
+
 def test_explicit_pg_dsn_overrides_settings():
     dsn = "postgresql://user:pw@aurora-host:5432/ai_platform"
     assert SemanticCache(pg_dsn=dsn)._pg_dsn == dsn
@@ -88,6 +90,7 @@ def test_write_skips_semantic_layer_without_dsn():
 
 
 # ── Model-constraint keying ────────────────────────────────────────────────────
+
 
 def test_pinned_lookup_never_hits_other_models_entry():
     cache = _make_cache(pg_dsn="")
@@ -153,3 +156,27 @@ def test_write_then_exact_lookup_round_trips_via_redis():
     assert result.source == "exact"
     assert result.response == "Paris."
     assert result.model_used == "test/model"
+
+
+def test_private_cache_entries_are_isolated_by_namespace():
+    cache = _make_cache(pg_dsn="")
+    _track_embed_calls(cache)
+
+    asyncio.run(
+        cache.write(
+            prompt="Summarize ticket",
+            response="caller-a response",
+            model_used="test/model",
+            input_tokens=3,
+            output_tokens=2,
+            namespace="caller:a",
+        )
+    )
+
+    same_caller = asyncio.run(cache.lookup("Summarize ticket", namespace="caller:a"))
+    other_caller = asyncio.run(cache.lookup("Summarize ticket", namespace="caller:b"))
+    shared = asyncio.run(cache.lookup("Summarize ticket", namespace="shared"))
+
+    assert same_caller is not None and same_caller.response == "caller-a response"
+    assert other_caller is None
+    assert shared is None

@@ -68,7 +68,9 @@ docker run --env-file .env -p 8080:8080 ai-platform
 
 ## 2. First AWS deployment
 
-Terraform provisions the network, DynamoDB tables, Secrets Manager secrets, Aurora pgvector database, Redis cache, gateway and health-checker Lambdas, API Gateway, monitoring, and GitHub Actions OIDC role. Do not apply individual modules for a normal deployment.
+Terraform supports two profiles. The default lean portfolio profile provisions DynamoDB tables, only the enabled Secrets Manager provider credentials, one gateway Lambda, API Gateway, monitoring, and the GitHub Actions OIDC role. It does not provision the health-checker Lambda, provider-health schedule, VPC/NAT, Redis-compatible cache, Aurora pgvector database, or provisioned concurrency.
+
+The full profile adds those optional components without changing the application contract. Do not apply individual modules for a normal deployment.
 
 ### Build the Lambda package
 
@@ -124,9 +126,9 @@ terraform plan
 terraform apply
 ```
 
-Review the plan before approving it. The apply can take several minutes because Aurora, ElastiCache, VPC endpoints, and provisioned Lambda concurrency must become ready.
+Review the plan before approving it. A full-profile apply can take several minutes while Aurora, ElastiCache, VPC endpoints, and provisioned Lambda concurrency become ready; the lean profile omits them.
 
-The pgvector migration runs automatically through the RDS Data API. No manual database commands are required.
+With the default lean values, those long-lived cache resources are omitted. Bedrock and Anthropic are enabled, while OpenAI is an explicit opt-in. Before connecting OpsDesk, set `OPS_AGENT_LLM_GATEWAY_CACHE_POLICY=off` in its AWS overlay. OpsDesk requests use `budget=low`, which is a hard ceiling that cannot fall through to mid- or high-tier models. To demonstrate the full cache profile later, set `cache_enabled = true`; the pgvector migration then runs automatically through the RDS Data API. Enabling scheduled health checks creates the health-checker Lambda and its EventBridge schedule as one opt-in unit.
 
 ### Retrieve deployment values
 
@@ -193,7 +195,7 @@ Deployment is ready when:
 
 ### CI/CD
 
-Pushes and pull requests run tests and Terraform validation. A push to `main` builds the arm64 package and deploys both Lambdas through GitHub Actions.
+Pushes and pull requests run tests and Terraform validation. A push to `main` builds the arm64 package and deploys the gateway through GitHub Actions. The workflow uses the `DEPLOY_ENVIRONMENT` repository variable, defaulting to `dev`, and deploys the health-checker only when `ENABLE_SCHEDULED_HEALTH_CHECKS=true`.
 
 Before relying on CI, store the deployment role ARN as the repository secret `AWS_DEPLOY_ROLE_ARN`:
 
@@ -208,24 +210,19 @@ The OIDC role is restricted to this repository's `main` branch and does not requ
 
 ### Manual Lambda code update
 
-Prefer CI for production. If a manual update is necessary, rebuild the arm64 zip using the command in section 2, then update both functions:
+Prefer CI for routine code updates. If a manual lean-profile update is necessary, rebuild the arm64 zip using the command in section 2, then update the gateway:
 
 ```bash
 aws lambda update-function-code \
-  --function-name ai-platform-gateway-production \
+  --function-name ai-platform-gateway-dev \
   --zip-file fileb://ai-platform/dist/ai-platform.zip \
   --architectures arm64
 
 aws lambda wait function-updated \
-  --function-name ai-platform-gateway-production
-
-aws lambda update-function-code \
-  --function-name ai-platform-health-checker-production \
-  --zip-file fileb://ai-platform/dist/ai-platform.zip \
-  --architectures arm64
+  --function-name ai-platform-gateway-dev
 ```
 
-The CI workflow additionally publishes a gateway version, moves the `live` alias, and waits for provisioned concurrency. Use CI whenever those production guarantees matter.
+The CI workflow publishes a gateway version and moves the `live` alias. It waits for provisioned concurrency only when `ENABLE_PROVISIONED_CONCURRENCY=true`.
 
 ### Additional API keys
 
@@ -273,7 +270,7 @@ Rebuild the package inside the `python:3.12-arm64` Lambda image. Do not package 
 
 **A provider becomes unavailable**
 
-The scheduled health checker updates the provider-health table every five minutes, and the router falls back to another healthy provider. Check health-checker Lambda logs and confirm Bedrock model access and provider secrets before changing routing code.
+When `enable_scheduled_health_checks = true`, Terraform creates a health-checker Lambda that updates the provider-health table every five minutes. In the lean profile that Lambda and schedule are both absent; request-driven circuit breakers still persist provider state in DynamoDB. Check gateway logs, Bedrock model access, and enabled provider secrets before changing routing code.
 
 **WAF cannot be associated with the API**
 

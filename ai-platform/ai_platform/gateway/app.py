@@ -2,6 +2,7 @@
 FastAPI application — Lambda entry point via Mangum.
 All platform middleware and routing is wired here.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -13,7 +14,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from mangum import Mangum
 
@@ -24,6 +25,7 @@ from ..cache.semantic_cache import SemanticCache
 from ..config.settings import get_settings
 from ..metrics.emitter import emit_error_metric, emit_request_metric
 from ..models.schemas import (
+    CachePolicy,
     ErrorResponse,
     HealthResponse,
     InferenceRequest,
@@ -88,6 +90,22 @@ def _find_provider(router: LLMRouter, provider_name: str) -> BaseProvider | None
     return next((provider for provider in _all_providers(router) if provider.name == provider_name), None)
 
 
+def _validate_caller_metadata(body: InferenceRequest, caller: CallerIdentity) -> None:
+    if caller.app_name == "local-dev":
+        return
+    caller_app = body.metadata.caller_app
+    if caller_app != "unknown" and caller_app != caller.app_name:
+        raise HTTPException(status_code=403, detail="caller_app does not match authenticated caller")
+
+
+def _cache_namespace(body: InferenceRequest, caller: CallerIdentity) -> str | None:
+    if body.metadata.cache_policy == CachePolicy.OFF:
+        return None
+    if body.metadata.cache_policy == CachePolicy.PRIVATE:
+        return f"caller:{caller.caller_id}"
+    return "shared"
+
+
 async def _safe_cache_write(
     cache: SemanticCache,
     *,
@@ -97,6 +115,7 @@ async def _safe_cache_write(
     input_tokens: int,
     output_tokens: int,
     model_constraint: str = "",
+    namespace: str,
 ) -> None:
     settings = get_settings()
     timeout_seconds = max(settings.cache_write_timeout_ms, 1) / 1000
@@ -110,6 +129,7 @@ async def _safe_cache_write(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 model_constraint=model_constraint,
+                namespace=namespace,
             ),
             timeout=timeout_seconds,
         )
@@ -132,16 +152,16 @@ async def lifespan(app: FastAPI):
     pg_dsn = _resolve_pg_dsn(settings)
 
     # Resolve API keys — prefer direct env var, fall back to Secrets Manager ARN
-    anthropic_key = settings.anthropic_api_key
-    if not anthropic_key and settings.anthropic_secret_arn:
+    anthropic_key = settings.anthropic_api_key if settings.anthropic_enabled else ""
+    if settings.anthropic_enabled and not anthropic_key and settings.anthropic_secret_arn:
         try:
             anthropic_key = fetch_secret(settings.anthropic_secret_arn)
             logger.info("anthropic_key_loaded_from_secrets_manager")
         except Exception as exc:
             logger.error("anthropic_secret_fetch_failed", extra={"error": str(exc)})
 
-    openai_key = settings.openai_api_key
-    if not openai_key and settings.openai_secret_arn:
+    openai_key = settings.openai_api_key if settings.openai_enabled else ""
+    if settings.openai_enabled and not openai_key and settings.openai_secret_arn:
         try:
             openai_key = fetch_secret(settings.openai_secret_arn)
             logger.info("openai_key_loaded_from_secrets_manager")
@@ -150,7 +170,7 @@ async def lifespan(app: FastAPI):
 
     # Build providers
     anthropic_providers = []
-    if anthropic_key:
+    if settings.anthropic_enabled and anthropic_key:
         anthropic_providers = [
             AnthropicProvider(haiku_config(), anthropic_key),
             AnthropicProvider(sonnet_config(), anthropic_key),
@@ -158,16 +178,18 @@ async def lifespan(app: FastAPI):
         ]
 
     openai_providers = []
-    if openai_key:
+    if settings.openai_enabled and openai_key:
         openai_providers = [
             OpenAIProvider(gpt4o_mini_config(), openai_key),
             OpenAIProvider(gpt4o_config(), openai_key),
         ]
 
-    bedrock_providers = [
-        BedrockProvider(nova_micro_config()),
-        BedrockProvider(bedrock_haiku_config()),
-    ]
+    bedrock_providers = []
+    if settings.bedrock_enabled:
+        bedrock_providers = [
+            BedrockProvider(nova_micro_config()),
+            BedrockProvider(bedrock_haiku_config()),
+        ]
 
     providers_by_tier = {
         "low": [*bedrock_providers, *(p for p in anthropic_providers if p.tier == "low")],
@@ -180,6 +202,9 @@ async def lifespan(app: FastAPI):
             *(p for p in openai_providers if p.tier == "high"),
         ],
     }
+
+    if not any(providers_by_tier.values()):
+        raise RuntimeError("At least one configured LLM provider must be enabled")
 
     app.state.router = LLMRouter(providers_by_tier)
     app.state.cache = SemanticCache(pg_dsn=pg_dsn)
@@ -196,7 +221,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="AI Platform Gateway",
     version="1.0.0",
-    docs_url=None,    # Disable Swagger UI in production
+    docs_url=None,  # Disable Swagger UI in production
     redoc_url=None,
     lifespan=lifespan,
 )
@@ -246,15 +271,24 @@ async def chat_completion(
     request_id = request.state.request_id
     start_time = time.perf_counter()
 
+    _validate_caller_metadata(body, caller)
+
     # Rate limit check
     await request.app.state.rate_limiter.check_and_increment(caller)
 
     cache: SemanticCache = request.app.state.cache
     router: LLMRouter = request.app.state.router
     model_constraint = body.model_preference or ""
+    cache_namespace = _cache_namespace(body, caller)
 
     # ── Cache lookup ──────────────────────────────────────────────────────────
-    cached = await cache.lookup(body.prompt_text, model_constraint=model_constraint)
+    cached = None
+    if cache_namespace is not None:
+        cached = await cache.lookup(
+            body.prompt_text,
+            model_constraint=model_constraint,
+            namespace=cache_namespace,
+        )
     if cached:
         latency_ms = int((time.perf_counter() - start_time) * 1000)
         emit_request_metric(
@@ -280,6 +314,7 @@ async def chat_completion(
             usage=UsageStats(),
             cache_hit=True,
             cache_source=cached.source,
+            cache_policy=body.metadata.cache_policy,
             latency_ms=latency_ms,
         )
 
@@ -319,15 +354,17 @@ async def chat_completion(
     if provider_obj:
         cost = provider_response.estimated_cost(provider_obj.config)
 
-    await _safe_cache_write(
-        cache,
-        prompt=body.prompt_text,
-        response=provider_response.content,
-        model_used=provider_response.model_id,
-        input_tokens=provider_response.input_tokens,
-        output_tokens=provider_response.output_tokens,
-        model_constraint=model_constraint,
-    )
+    if cache_namespace is not None:
+        await _safe_cache_write(
+            cache,
+            prompt=body.prompt_text,
+            response=provider_response.content,
+            model_used=provider_response.model_id,
+            input_tokens=provider_response.input_tokens,
+            output_tokens=provider_response.output_tokens,
+            model_constraint=model_constraint,
+            namespace=cache_namespace,
+        )
 
     emit_request_metric(
         request_id=request_id,
@@ -363,6 +400,7 @@ async def chat_completion(
             estimated_cost_usd=round(cost, 6),
         ),
         cache_hit=False,
+        cache_policy=body.metadata.cache_policy,
         latency_ms=latency_ms,
     )
 
@@ -381,14 +419,23 @@ async def chat_completion_stream(
     request_id = request.state.request_id
     start_time = time.perf_counter()
 
+    _validate_caller_metadata(body, caller)
+
     await request.app.state.rate_limiter.check_and_increment(caller)
 
     cache: SemanticCache = request.app.state.cache
     router: LLMRouter = request.app.state.router
     model_constraint = body.model_preference or ""
+    cache_namespace = _cache_namespace(body, caller)
 
     # Serve exact/semantic cache hits as a single synthetic SSE event
-    cached = await cache.lookup(body.prompt_text, model_constraint=model_constraint)
+    cached = None
+    if cache_namespace is not None:
+        cached = await cache.lookup(
+            body.prompt_text,
+            model_constraint=model_constraint,
+            namespace=cache_namespace,
+        )
     if cached:
         latency_ms = int((time.perf_counter() - start_time) * 1000)
         emit_request_metric(
@@ -476,15 +523,17 @@ async def chat_completion_stream(
                 input_tokens * provider_obj.config.cost_per_input_token
                 + output_tokens * provider_obj.config.cost_per_output_token
             )
-        await _safe_cache_write(
-            cache,
-            prompt=body.prompt_text,
-            response="".join(streamed_chunks),
-            model_used=model_id,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            model_constraint=model_constraint,
-        )
+        if cache_namespace is not None:
+            await _safe_cache_write(
+                cache,
+                prompt=body.prompt_text,
+                response="".join(streamed_chunks),
+                model_used=model_id,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                model_constraint=model_constraint,
+                namespace=cache_namespace,
+            )
         emit_request_metric(
             request_id=request_id,
             caller_id=caller.caller_id,

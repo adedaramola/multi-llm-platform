@@ -31,14 +31,15 @@ resource "aws_rds_cluster" "pgvector" {
   vpc_security_group_ids      = [var.cache_sg_id]
   db_subnet_group_name        = aws_db_subnet_group.pgvector.name
   storage_encrypted           = true
-  deletion_protection         = var.environment != "production"
+  deletion_protection         = var.environment == "production"
   skip_final_snapshot         = true
 
   enable_http_endpoint = true # RDS Data API — allows migration without bastion host
 
   serverlessv2_scaling_configuration {
-    min_capacity = 0.5 # ~$0.07/hr minimum when active
-    max_capacity = 4   # scale up to 4 ACUs under load
+    min_capacity             = var.min_capacity
+    max_capacity             = var.max_capacity
+    seconds_until_auto_pause = var.auto_pause_seconds
   }
 }
 

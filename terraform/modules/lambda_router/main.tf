@@ -1,5 +1,6 @@
 locals {
-  function_name = "ai-platform-gateway-${var.environment}"
+  function_name       = "ai-platform-gateway-${var.environment}"
+  runtime_secret_arns = compact([var.anthropic_secret_arn, var.openai_secret_arn, var.pg_secret_arn])
 }
 
 # ── IAM Role ──────────────────────────────────────────────────────────────────
@@ -22,58 +23,66 @@ resource "aws_iam_role_policy" "lambda" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        # CloudWatch Logs
-        Effect   = "Allow"
-        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "arn:aws:logs:${var.aws_region}:*:log-group:/aws/lambda/${local.function_name}:*"
-      },
-      {
-        # X-Ray
-        Effect   = "Allow"
-        Action   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"]
-        Resource = "*"
-      },
-      {
-        # DynamoDB — auth tables + health registry + usage accounting
-        # Query is needed for per-caller month aggregation on the usage table
-        Effect = "Allow"
-        Action = [
-          "dynamodb:GetItem", "dynamodb:PutItem",
-          "dynamodb:UpdateItem", "dynamodb:Scan",
-          "dynamodb:Query"
-        ]
-        Resource = [
-          "arn:aws:dynamodb:${var.aws_region}:*:table/${var.api_keys_table_name}",
-          "arn:aws:dynamodb:${var.aws_region}:*:table/${var.rate_limit_table_name}",
-          "arn:aws:dynamodb:${var.aws_region}:*:table/${var.health_table_name}",
-          "arn:aws:dynamodb:${var.aws_region}:*:table/${var.usage_table_name}",
-        ]
-      },
-      {
-        # Secrets Manager — read API keys
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [var.anthropic_secret_arn, var.openai_secret_arn, var.pg_secret_arn]
-      },
-      {
-        # Bedrock — inference + embeddings
-        Effect   = "Allow"
-        Action   = ["bedrock:InvokeModel"]
-        Resource = "*"
-      },
-      {
-        # VPC — required for Lambda in VPC
-        Effect = "Allow"
-        Action = [
-          "ec2:CreateNetworkInterface",
-          "ec2:DescribeNetworkInterfaces",
-          "ec2:DeleteNetworkInterface"
-        ]
-        Resource = "*"
-      }
-    ]
+    Statement = concat(
+      [
+        {
+          # CloudWatch Logs
+          Effect   = "Allow"
+          Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+          Resource = "arn:aws:logs:${var.aws_region}:*:log-group:/aws/lambda/${local.function_name}:*"
+        },
+        {
+          # X-Ray
+          Effect   = "Allow"
+          Action   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"]
+          Resource = "*"
+        },
+        {
+          # DynamoDB — auth tables + health registry + usage accounting
+          # Query is needed for per-caller month aggregation on the usage table
+          Effect = "Allow"
+          Action = [
+            "dynamodb:GetItem", "dynamodb:PutItem",
+            "dynamodb:UpdateItem", "dynamodb:Scan",
+            "dynamodb:Query"
+          ]
+          Resource = [
+            "arn:aws:dynamodb:${var.aws_region}:*:table/${var.api_keys_table_name}",
+            "arn:aws:dynamodb:${var.aws_region}:*:table/${var.rate_limit_table_name}",
+            "arn:aws:dynamodb:${var.aws_region}:*:table/${var.health_table_name}",
+            "arn:aws:dynamodb:${var.aws_region}:*:table/${var.usage_table_name}",
+          ]
+        },
+      ],
+      length(local.runtime_secret_arns) > 0 ? [
+        {
+          # Secrets Manager — enabled provider keys and optional pgvector credentials
+          Effect   = "Allow"
+          Action   = ["secretsmanager:GetSecretValue"]
+          Resource = local.runtime_secret_arns
+        }
+      ] : [],
+      var.bedrock_enabled || var.cache_enabled ? [
+        {
+          # Bedrock — inference and optional semantic-cache embeddings
+          Effect   = "Allow"
+          Action   = ["bedrock:InvokeModel"]
+          Resource = "*"
+        }
+      ] : [],
+      var.vpc_enabled ? [
+        {
+          # VPC — required only when the private cache stack is enabled
+          Effect = "Allow"
+          Action = [
+            "ec2:CreateNetworkInterface",
+            "ec2:DescribeNetworkInterfaces",
+            "ec2:DeleteNetworkInterface"
+          ]
+          Resource = "*"
+        }
+      ] : []
+    )
   })
 }
 
@@ -90,9 +99,12 @@ resource "aws_lambda_function" "gateway" {
   memory_size      = 512       # sufficient for FastAPI + boto3 + asyncpg
   publish          = true      # required for provisioned concurrency
 
-  vpc_config {
-    subnet_ids         = var.private_subnet_ids
-    security_group_ids = [var.lambda_sg_id]
+  dynamic "vpc_config" {
+    for_each = var.vpc_enabled ? [1] : []
+    content {
+      subnet_ids         = var.private_subnet_ids
+      security_group_ids = [var.lambda_sg_id]
+    }
   }
 
   environment {
@@ -106,11 +118,14 @@ resource "aws_lambda_function" "gateway" {
       USAGE_TABLE          = var.usage_table_name
       ANTHROPIC_SECRET_ARN = var.anthropic_secret_arn
       OPENAI_SECRET_ARN    = var.openai_secret_arn
+      BEDROCK_ENABLED      = tostring(var.bedrock_enabled)
+      ANTHROPIC_ENABLED    = tostring(var.anthropic_enabled)
+      OPENAI_ENABLED       = tostring(var.openai_enabled)
       PG_SECRET_ARN        = var.pg_secret_arn
       PG_HOST              = var.pg_host
       PG_PORT              = "5432"
       PG_DATABASE          = "ai_platform"
-      CACHE_ENABLED        = "true"
+      CACHE_ENABLED        = tostring(var.cache_enabled)
       RATE_LIMIT_FAIL_OPEN = "false"
       LOG_LEVEL            = var.environment == "production" ? "INFO" : "DEBUG"
     }
@@ -146,6 +161,8 @@ resource "aws_lambda_alias" "live" {
 }
 
 resource "aws_lambda_provisioned_concurrency_config" "gateway" {
+  count = var.enable_provisioned_concurrency ? 1 : 0
+
   function_name                     = aws_lambda_function.gateway.function_name
   qualifier                         = aws_lambda_alias.live.name
   provisioned_concurrent_executions = 2

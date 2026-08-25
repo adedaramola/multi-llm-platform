@@ -5,3 +5,6 @@ variable "private_subnet_ids" {
 }
 variable "lambda_sg_id" { type = string }
 variable "cache_sg_id" { type = string }
+variable "min_capacity" { type = number }
+variable "max_capacity" { type = number }
+variable "auto_pause_seconds" { type = number }

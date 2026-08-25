@@ -2,6 +2,7 @@
 API-level tests for gateway/app.py using lightweight in-memory fakes.
 These tests exercise endpoint behavior without AWS/network dependencies.
 """
+
 from __future__ import annotations
 
 import sys
@@ -138,10 +139,10 @@ class FakeCache:
     def __init__(self, lookup_result=None) -> None:
         self.lookup_result = lookup_result
         self.writes: list[dict] = []
-        self.lookups: list[tuple[str, str]] = []
+        self.lookups: list[tuple[str, str, str]] = []
 
-    async def lookup(self, prompt: str, model_constraint: str = ""):
-        self.lookups.append((prompt, model_constraint))
+    async def lookup(self, prompt: str, model_constraint: str = "", namespace: str = "shared"):
+        self.lookups.append((prompt, model_constraint, namespace))
         return self.lookup_result
 
     async def write(
@@ -153,6 +154,7 @@ class FakeCache:
         output_tokens: int,
         ttl_seconds: int | None = None,
         model_constraint: str = "",
+        namespace: str = "shared",
     ) -> None:
         self.writes.append(
             {
@@ -162,6 +164,7 @@ class FakeCache:
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "model_constraint": model_constraint,
+                "namespace": namespace,
             }
         )
 
@@ -252,7 +255,13 @@ def _auth_override():
 def _request_body(content: str = "hello") -> dict:
     return {
         "messages": [{"role": "user", "content": content}],
-        "metadata": {"budget": "standard", "latency_sla_ms": 1000},
+        "metadata": {
+            "budget": "standard",
+            "latency_sla_ms": 1000,
+            "caller_app": "test-app",
+            "cache_policy": "shared",
+            "data_classification": "public",
+        },
     }
 
 
@@ -396,8 +405,94 @@ def test_chat_model_preference_flows_into_cache_key():
 
     _teardown_app_state()
     assert resp.status_code == 200
-    assert cache.lookups == [("user: pin me", "opus")]
+    assert cache.lookups == [("user: pin me", "opus", "shared")]
     assert cache.writes[0]["model_constraint"] == "opus"
+
+
+def test_chat_cache_off_skips_all_cache_operations():
+    router = FakeRouter()
+    cache = FakeCache(lookup_result=FakeCacheResult(response="must-not-be-used", source="exact"))
+    limiter = FakeRateLimiter()
+    registry = FakeRegistry({"cheap-model": True})
+    body = _request_body("sensitive ticket")
+    body["metadata"]["cache_policy"] = "off"
+    body["metadata"]["data_classification"] = "restricted"
+
+    gateway.app.dependency_overrides[gateway.get_caller_identity] = _auth_override
+    with (
+        patch.object(gateway, "get_health_registry", return_value=registry),
+        patch.object(gateway, "emit_request_metric", return_value=None),
+        patch.object(gateway, "emit_error_metric", return_value=None),
+        TestClient(gateway.app) as client,
+    ):
+        _setup_app_state(router, cache, limiter)
+        resp = client.post("/v1/chat", json=body)
+
+    _teardown_app_state()
+    assert resp.status_code == 200
+    assert resp.json()["cache_policy"] == "off"
+    assert cache.lookups == []
+    assert cache.writes == []
+    assert router.route_calls == 1
+
+
+def test_chat_private_cache_is_scoped_to_authenticated_caller():
+    router = FakeRouter()
+    cache = FakeCache(lookup_result=None)
+    limiter = FakeRateLimiter()
+    registry = FakeRegistry({"cheap-model": True})
+    body = _request_body("private ticket")
+    body["metadata"]["cache_policy"] = "private"
+    body["metadata"]["data_classification"] = "restricted"
+
+    gateway.app.dependency_overrides[gateway.get_caller_identity] = _auth_override
+    with (
+        patch.object(gateway, "get_health_registry", return_value=registry),
+        patch.object(gateway, "emit_request_metric", return_value=None),
+        patch.object(gateway, "emit_error_metric", return_value=None),
+        TestClient(gateway.app) as client,
+    ):
+        _setup_app_state(router, cache, limiter)
+        resp = client.post("/v1/chat", json=body)
+
+    _teardown_app_state()
+    assert resp.status_code == 200
+    assert cache.lookups == [("user: private ticket", "", "caller:test-caller")]
+    assert cache.writes[0]["namespace"] == "caller:test-caller"
+    assert resp.json()["cache_policy"] == "private"
+
+
+def test_shared_cache_rejects_non_public_data():
+    body = _request_body("not public")
+    body["metadata"]["data_classification"] = "restricted"
+
+    gateway.app.dependency_overrides[gateway.get_caller_identity] = _auth_override
+    with TestClient(gateway.app) as client:
+        resp = client.post("/v1/chat", json=body)
+
+    _teardown_app_state()
+    assert resp.status_code == 422
+
+
+def test_caller_app_must_match_authenticated_identity():
+    router = FakeRouter()
+    cache = FakeCache()
+    limiter = FakeRateLimiter()
+    registry = FakeRegistry({"cheap-model": True})
+    body = _request_body("spoofed caller")
+    body["metadata"]["caller_app"] = "another-app"
+
+    gateway.app.dependency_overrides[gateway.get_caller_identity] = _auth_override
+    with (
+        patch.object(gateway, "get_health_registry", return_value=registry),
+        TestClient(gateway.app) as client,
+    ):
+        _setup_app_state(router, cache, limiter)
+        resp = client.post("/v1/chat", json=body)
+
+    _teardown_app_state()
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "caller_app does not match authenticated caller"
 
 
 def test_chat_returns_503_when_all_providers_fail():

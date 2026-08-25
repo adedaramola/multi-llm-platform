@@ -44,38 +44,42 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        # All Lambda deploy actions are evaluated against the base function ARN.
-        # UpdateAlias targets a named alias via request parameter, not resource ARN.
-        Sid    = "LambdaDeploy"
-        Effect = "Allow"
-        Action = [
-          "lambda:UpdateFunctionCode",
-          "lambda:GetFunction",
-          "lambda:GetFunctionConfiguration",
-          "lambda:PublishVersion",
-          "lambda:UpdateAlias",
-          "lambda:GetAlias",
-          "lambda:InvokeFunction",
-        ]
-        Resource = [
-          var.gateway_function_arn,
-          var.health_checker_function_arn,
-        ]
-      },
-      {
-        Sid      = "GatewayProvisionedConcurrencyRead"
-        Effect   = "Allow"
-        Action   = ["lambda:GetProvisionedConcurrencyConfig"]
-        Resource = "${var.gateway_function_arn}:live"
-      },
-      {
-        Sid      = "ApiGatewayDiscovery"
-        Effect   = "Allow"
-        Action   = ["apigateway:GET"]
-        Resource = "arn:aws:apigateway:${data.aws_region.current.name}::/apis"
-      },
-    ]
+    Statement = concat(
+      [
+        {
+          # All Lambda deploy actions are evaluated against the base function ARN.
+          # UpdateAlias targets a named alias via request parameter, not resource ARN.
+          Sid    = "LambdaDeploy"
+          Effect = "Allow"
+          Action = [
+            "lambda:UpdateFunctionCode",
+            "lambda:GetFunction",
+            "lambda:GetFunctionConfiguration",
+            "lambda:PublishVersion",
+            "lambda:UpdateAlias",
+            "lambda:GetAlias",
+            "lambda:InvokeFunction",
+          ]
+          Resource = compact([
+            var.gateway_function_arn,
+            var.health_checker_function_arn,
+          ])
+        },
+        {
+          Sid      = "ApiGatewayDiscovery"
+          Effect   = "Allow"
+          Action   = ["apigateway:GET"]
+          Resource = "arn:aws:apigateway:${data.aws_region.current.name}::/apis"
+        },
+      ],
+      var.provisioned_concurrency ? [
+        {
+          Sid      = "GatewayProvisionedConcurrencyRead"
+          Effect   = "Allow"
+          Action   = ["lambda:GetProvisionedConcurrencyConfig"]
+          Resource = "${var.gateway_function_arn}:live"
+        }
+      ] : []
+    )
   })
 }
