@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -46,6 +47,9 @@ logging.basicConfig(
     format='{"time":"%(asctime)s","level":"%(levelname)s","name":"%(name)s","message":%(message)s}',
 )
 logger = logging.getLogger(__name__)
+
+TRACEPARENT_PATTERN = re.compile(r"^00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}$")
+WORKFLOW_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 
 
 def _resolve_pg_dsn(settings) -> str:
@@ -96,6 +100,14 @@ def _validate_caller_metadata(body: InferenceRequest, caller: CallerIdentity) ->
     caller_app = body.metadata.caller_app
     if caller_app != "unknown" and caller_app != caller.app_name:
         raise HTTPException(status_code=403, detail="caller_app does not match authenticated caller")
+
+
+def _correlation_context(request: Request, body: InferenceRequest) -> tuple[str | None, str | None]:
+    header_workflow_id = request.state.workflow_id
+    body_workflow_id = body.metadata.workflow_id
+    if header_workflow_id and body_workflow_id and header_workflow_id != body_workflow_id:
+        raise HTTPException(status_code=400, detail="workflow correlation identifiers do not match")
+    return request.state.trace_id, header_workflow_id or body_workflow_id
 
 
 def _cache_namespace(body: InferenceRequest, caller: CallerIdentity) -> str | None:
@@ -231,8 +243,17 @@ app = FastAPI(
 async def request_id_middleware(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
     request.state.request_id = request_id
+    traceparent = request.headers.get("traceparent", "")
+    request.state.traceparent = traceparent if TRACEPARENT_PATTERN.fullmatch(traceparent) else None
+    request.state.trace_id = traceparent[3:35] if request.state.traceparent else None
+    workflow_id = request.headers.get("X-Workflow-ID", "")
+    request.state.workflow_id = workflow_id if WORKFLOW_ID_PATTERN.fullmatch(workflow_id) else None
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
+    if request.state.traceparent:
+        response.headers["traceparent"] = request.state.traceparent
+    if request.state.workflow_id:
+        response.headers["X-Workflow-ID"] = request.state.workflow_id
     return response
 
 
@@ -269,6 +290,7 @@ async def chat_completion(
     caller: Annotated[CallerIdentity, Depends(get_caller_identity)],
 ) -> InferenceResponse | JSONResponse:
     request_id = request.state.request_id
+    trace_id, workflow_id = _correlation_context(request, body)
     start_time = time.perf_counter()
 
     _validate_caller_metadata(body, caller)
@@ -304,6 +326,8 @@ async def chat_completion(
             cache_source=cached.source,
             status_code=200,
             estimated_cost_usd=0.0,
+            trace_id=trace_id,
+            workflow_id=workflow_id,
         )
         await request.app.state.usage_recorder.record(caller.caller_id, cache_hit=True)
         return InferenceResponse(
@@ -335,8 +359,18 @@ async def chat_completion(
             caller_id=caller.caller_id,
             error_type="all_providers_failed",
             status_code=503,
+            trace_id=trace_id,
+            workflow_id=workflow_id,
         )
-        logger.error("all_providers_failed", extra={"error": str(exc), "request_id": request_id})
+        logger.error(
+            "all_providers_failed",
+            extra={
+                "error": str(exc),
+                "request_id": request_id,
+                "trace_id": trace_id,
+                "workflow_id": workflow_id,
+            },
+        )
         return JSONResponse(
             status_code=503,
             content=ErrorResponse(
@@ -379,6 +413,8 @@ async def chat_completion(
         cache_source="none",
         status_code=200,
         estimated_cost_usd=cost,
+        trace_id=trace_id,
+        workflow_id=workflow_id,
     )
 
     await request.app.state.usage_recorder.record(
@@ -417,6 +453,7 @@ async def chat_completion_stream(
     The final event is: data: [DONE]\n\n
     """
     request_id = request.state.request_id
+    trace_id, workflow_id = _correlation_context(request, body)
     start_time = time.perf_counter()
 
     _validate_caller_metadata(body, caller)
@@ -451,6 +488,8 @@ async def chat_completion_stream(
             cache_source=cached.source,
             status_code=200,
             estimated_cost_usd=0.0,
+            trace_id=trace_id,
+            workflow_id=workflow_id,
         )
 
         await request.app.state.usage_recorder.record(caller.caller_id, cache_hit=True)
@@ -497,6 +536,8 @@ async def chat_completion_stream(
                 caller_id=caller.caller_id,
                 error_type="stream_interrupted",
                 status_code=502,
+                trace_id=trace_id,
+                workflow_id=workflow_id,
             )
             logger.error("stream_interrupted", extra={"error": str(exc), "request_id": request_id})
             yield "data: [ERROR] Stream interrupted\n\n"
@@ -507,6 +548,8 @@ async def chat_completion_stream(
                 caller_id=caller.caller_id,
                 error_type="all_providers_failed",
                 status_code=503,
+                trace_id=trace_id,
+                workflow_id=workflow_id,
             )
             logger.error("stream_all_providers_failed", extra={"error": str(exc), "request_id": request_id})
             yield "data: [ERROR] All providers failed\n\n"
@@ -547,6 +590,8 @@ async def chat_completion_stream(
             cache_source="none",
             status_code=200,
             estimated_cost_usd=cost,
+            trace_id=trace_id,
+            workflow_id=workflow_id,
         )
         await request.app.state.usage_recorder.record(
             caller.caller_id,

@@ -3,6 +3,7 @@ CloudWatch EMF (Embedded Metric Format) publisher.
 Emitting via stdout in Lambda is free and zero-dependency.
 CloudWatch parses the JSON automatically and creates metrics.
 """
+
 from __future__ import annotations
 
 import json
@@ -26,6 +27,8 @@ def emit_request_metric(
     cache_source: str,
     status_code: int,
     estimated_cost_usd: float,
+    trace_id: str | None = None,
+    workflow_id: str | None = None,
 ) -> None:
     """
     Emit a structured CloudWatch EMF log line.
@@ -69,6 +72,8 @@ def emit_request_metric(
         "caller_id": caller_id,
         "cache_source": cache_source,
         "status_code": status_code,
+        "trace_id": trace_id,
+        "workflow_id": workflow_id,
     }
     # Print to stdout — Lambda captures this as a structured CloudWatch log event
     print(json.dumps(emf))
@@ -80,6 +85,8 @@ def emit_error_metric(
     caller_id: str,
     error_type: str,
     status_code: int,
+    trace_id: str | None = None,
+    workflow_id: str | None = None,
 ) -> None:
     emf = {
         "_aws": {
@@ -97,5 +104,7 @@ def emit_error_metric(
         "request_id": request_id,
         "caller_id": caller_id,
         "status_code": status_code,
+        "trace_id": trace_id,
+        "workflow_id": workflow_id,
     }
     print(json.dumps(emf))
