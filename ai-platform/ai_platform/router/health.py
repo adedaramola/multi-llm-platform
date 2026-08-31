@@ -90,7 +90,7 @@ class ProviderHealthRegistry:
                     ":ts": int(self._time_fn()),
                 },
             )
-        except Exception:
+        except Exception:  # nosec B110
             pass  # non-critical path
 
     def mark_success(self, provider_name: str) -> None:
@@ -136,7 +136,7 @@ class ProviderHealthRegistry:
                 ExpressionAttributeNames={"#s": "status"},
                 ExpressionAttributeValues={":status": status},
             )
-        except Exception:
+        except Exception:  # nosec B110
             # Health writes must not make the scheduled checker fail. The next
             # probe will retry and successful probes reset the persisted count.
             pass

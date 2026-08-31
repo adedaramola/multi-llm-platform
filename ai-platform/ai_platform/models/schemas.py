@@ -47,7 +47,12 @@ class RequestMetadata(BaseModel):
     reasoning_required: bool = False
     stream: bool = False
     caller_app: str = Field(default="unknown", max_length=64)
-    workflow_id: str | None = Field(default=None, max_length=64)
+    workflow_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$",
+    )
     cache_policy: CachePolicy = CachePolicy.OFF
     data_classification: DataClassification = DataClassification.INTERNAL
 

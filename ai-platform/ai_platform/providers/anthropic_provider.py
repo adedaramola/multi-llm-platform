@@ -118,7 +118,7 @@ class AnthropicProvider(BaseProvider):
                 try:
                     final = await stream.get_final_message()
                     on_usage(final.usage.input_tokens, final.usage.output_tokens)
-                except Exception:
+                except Exception:  # nosec B110
                     # Usage is best-effort — never fail a delivered stream over it
                     pass
 

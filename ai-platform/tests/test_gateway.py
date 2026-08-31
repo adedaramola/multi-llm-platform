@@ -342,6 +342,38 @@ def test_chat_cache_hit_returns_cached_response():
     assert limiter.calls == 1
 
 
+def test_chat_preserves_opsdesk_trace_and_workflow_correlation():
+    router = FakeRouter()
+    cache = FakeCache(lookup_result=FakeCacheResult(response="from-cache", source="exact"))
+    limiter = FakeRateLimiter()
+    registry = FakeRegistry({"cheap-model": True})
+    body = _request_body("correlated ticket")
+    workflow_id = "12345678-1234-1234-1234-1234567890ab"
+    traceparent = "00-1234567890abcdef1234567890abcdef-1234567890abcdef-01"
+    body["metadata"]["workflow_id"] = workflow_id
+    gateway.app.dependency_overrides[gateway.get_caller_identity] = _auth_override
+
+    with (
+        patch.object(gateway, "get_health_registry", return_value=registry),
+        patch.object(gateway, "emit_request_metric", return_value=None) as metric,
+        patch.object(gateway, "emit_error_metric", return_value=None),
+        TestClient(gateway.app) as client,
+    ):
+        _setup_app_state(router, cache, limiter)
+        response = client.post(
+            "/v1/chat",
+            headers={"traceparent": traceparent, "X-Workflow-ID": workflow_id},
+            json=body,
+        )
+
+    _teardown_app_state()
+    assert response.status_code == 200
+    assert response.headers["traceparent"] == traceparent
+    assert response.headers["X-Workflow-ID"] == workflow_id
+    assert metric.call_args.kwargs["trace_id"] == "1234567890abcdef1234567890abcdef"
+    assert metric.call_args.kwargs["workflow_id"] == workflow_id
+
+
 def test_chat_cache_miss_routes_and_writes_cache():
     router = FakeRouter(
         route_response=ProviderResponse(
